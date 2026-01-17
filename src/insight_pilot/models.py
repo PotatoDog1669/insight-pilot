@@ -1,8 +1,9 @@
 """Data models for insight-pilot."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -15,6 +16,44 @@ def utc_now() -> datetime:
 def utc_now_iso() -> str:
     """Return current UTC datetime as ISO string."""
     return utc_now().isoformat().replace("+00:00", "Z")
+
+
+@dataclass
+class ItemData:
+    """Lightweight item data class for processing.
+    
+    This is a simpler alternative to the Pydantic Item model,
+    useful for functions that don't need full validation.
+    """
+    id: str
+    title: str
+    authors: List[str] = field(default_factory=list)
+    date: Optional[str] = None
+    abstract: Optional[str] = None
+    arxiv_id: Optional[str] = None
+    doi: Optional[str] = None
+    openalex_id: Optional[str] = None
+    download_status: str = "pending"
+    status: str = "active"
+    local_path: Optional[str] = None
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ItemData":
+        """Create from dictionary (items.json format)."""
+        identifiers = data.get("identifiers", {}) or {}
+        return cls(
+            id=data.get("id", ""),
+            title=data.get("title", "Untitled"),
+            authors=data.get("authors", []),
+            date=data.get("date"),
+            abstract=data.get("abstract"),
+            arxiv_id=identifiers.get("arxiv_id"),
+            doi=identifiers.get("doi"),
+            openalex_id=identifiers.get("openalex_id"),
+            download_status=data.get("download_status", "pending"),
+            status=data.get("status", "active"),
+            local_path=data.get("local_path"),
+        )
 
 
 class Identifiers(BaseModel):

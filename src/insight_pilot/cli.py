@@ -10,6 +10,7 @@ Commands:
     merge       Merge search results
     dedup       Deduplicate items
     download    Download PDFs
+    analyze     Analyze papers with LLM
     index       Generate index.md
     status      Show project status
 """
@@ -355,27 +356,59 @@ def cmd_download(args: argparse.Namespace, formatter: OutputFormatter) -> int:
 
 
 def cmd_index(args: argparse.Namespace, formatter: OutputFormatter) -> int:
-    """Generate index.md."""
+    """Generate index.md and individual reports."""
     ctx = ProjectContext(Path(args.project))
 
     if not ctx.items_path.exists():
         formatter.error("items.json not found. Run 'merge' first.", ErrorCode.NO_ITEMS_FILE.value)
         return 1
 
-    from insight_pilot.output.index import generate_index
+    from insight_pilot.output.index import generate_index, generate_index_with_reports
+    from insight_pilot.models import ItemData
 
-    items = ctx.load_items()
+    items_data = ctx.load_items()
     state = ctx.load_state()
     topic = state.get("topic", "Research")
     keywords = state.get("keywords", [])
 
-    template_path = Path(args.template) if args.template else None
-    content = generate_index(items, topic, keywords, template_path)
+    # Convert to ItemData objects
+    items = [ItemData.from_dict(item) for item in items_data]
+    
+    # Filter to active items only
+    active_items = [item for item in items if item.status != "excluded"]
 
-    with open(ctx.index_path, "w", encoding="utf-8") as f:
-        f.write(content)
+    # Check if we should use the new analysis-based format
+    analysis_dir = ctx.insight_dir / "analysis"
+    has_analyses = analysis_dir.exists() and any(analysis_dir.glob("*.json"))
+    
+    if has_analyses and not args.legacy:
+        # Use new format with analysis integration
+        reports_dir = ctx.root / "reports"
+        content, report_paths = generate_index_with_reports(
+            active_items, topic, ctx.insight_dir, reports_dir, keywords
+        )
+        
+        with open(ctx.index_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        
+        formatter.success(
+            f"Generated index at {ctx.index_path}",
+            {
+                "index_path": str(ctx.index_path),
+                "reports_generated": len(report_paths),
+                "reports_dir": str(reports_dir),
+            }
+        )
+    else:
+        # Use legacy format (no analysis)
+        template_path = Path(args.template) if args.template else None
+        content = generate_index(items_data, topic, keywords, template_path)
 
-    formatter.success(f"Generated index at {ctx.index_path}")
+        with open(ctx.index_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        formatter.success(f"Generated index at {ctx.index_path}")
+    
     return 0
 
 
@@ -448,6 +481,110 @@ def cmd_status(args: argparse.Namespace, formatter: OutputFormatter) -> int:
     return 0
 
 
+def cmd_analyze(args: argparse.Namespace, formatter: OutputFormatter) -> int:
+    """Analyze papers with LLM."""
+    ctx = ProjectContext(Path(args.project))
+
+    if not ctx.exists():
+        formatter.error(f"Project not found at {args.project}", ErrorCode.PROJECT_NOT_FOUND.value)
+        return 1
+
+    if not ctx.items_path.exists():
+        formatter.error("items.json not found. Run 'merge' first.", ErrorCode.NO_ITEMS_FILE.value)
+        return 1
+
+    from insight_pilot.analyze import analyze_papers, load_llm_config
+
+    # Load LLM config
+    config_path = Path(args.config) if args.config else None
+    config = load_llm_config(config_path)
+
+    if not config:
+        formatter.info("LLM not configured. Agent should analyze papers manually.")
+        formatter.info("To configure LLM, create llm.yaml in .codex/skills/insight-pilot/")
+        if formatter.json_output:
+            print(json.dumps({
+                "status": "skipped",
+                "reason": "no_llm_config",
+                "message": "LLM not configured. Agent should analyze papers manually.",
+                "config_example_path": ".codex/skills/insight-pilot/llm.yaml.example",
+            }))
+        return 0
+
+    items = ctx.load_items()
+    active_items = [it for it in items if it.get("status") != "excluded"]
+    formatter.info(f"Analyzing {len(active_items)} papers with {config.get('provider')}/{config.get('model')}...")
+
+    result = analyze_papers(
+        items,
+        ctx.papers_dir,
+        ctx.analysis_dir,
+        config=config,
+        skip_existing=not args.force,
+        markdown_dir=ctx.markdown_dir,
+    )
+
+    if result.get("status") == "skipped":
+        formatter.info(result.get("message", "Analysis skipped"))
+        if formatter.json_output:
+            print(json.dumps(result))
+        return 0
+
+    stats = result.get("stats", {})
+    not_downloaded = stats.get('not_downloaded', 0)
+    if not_downloaded > 0:
+        formatter.info(f"Skipped {not_downloaded} papers without PDF. Run 'download' first.")
+    formatter.success(
+        f"Analysis complete: {stats.get('success', 0)} success, {stats.get('failed', 0)} failed, {stats.get('skipped', 0)} already analyzed",
+        result,
+    )
+    return 0
+
+
+def cmd_convert(args: argparse.Namespace, formatter: OutputFormatter) -> int:
+    """Convert PDFs to Markdown."""
+    ctx = ProjectContext(Path(args.project))
+
+    if not ctx.exists():
+        formatter.error(f"Project not found at {args.project}", ErrorCode.PROJECT_NOT_FOUND.value)
+        return 1
+
+    if not ctx.items_path.exists():
+        formatter.error("items.json not found. Run 'merge' first.", ErrorCode.NO_ITEMS_FILE.value)
+        return 1
+
+    from insight_pilot.convert import convert_papers
+
+    items = ctx.load_items()
+    downloaded = sum(1 for it in items if it.get("download_status") == "success")
+    
+    # Get backend from args or use default (will be loaded from config)
+    backend = getattr(args, 'backend', None)
+    backend_info = f" using {backend}" if backend else ""
+    formatter.info(f"Converting {downloaded} PDFs to Markdown{backend_info}...")
+
+    result = convert_papers(
+        items,
+        ctx.root,
+        ctx.markdown_dir,
+        skip_existing=not args.force,
+        backend=backend,
+        save_images=not args.no_images,
+    )
+
+    if result.get("status") == "failed":
+        formatter.error(result.get("message", "Conversion failed"), ErrorCode.CONVERSION_FAILED.value)
+        return 1
+
+    stats = result.get("stats", {})
+    used_backend = result.get("backend", "unknown")
+    formatter.success(
+        f"Conversion complete ({used_backend}): {stats.get('success', 0)} success, {stats.get('failed', 0)} failed, {stats.get('skipped', 0)} skipped",
+        result,
+    )
+    return 0
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -499,15 +636,31 @@ def main() -> int:
     add_common_args(p_download)
 
     # index
-    p_index = subparsers.add_parser("index", help="Generate index.md")
+    p_index = subparsers.add_parser("index", help="Generate index.md and reports")
     p_index.add_argument("--project", required=True, help="Project directory")
-    p_index.add_argument("--template", help="Custom Jinja2 template path")
+    p_index.add_argument("--template", help="Custom Jinja2 template path (legacy mode only)")
+    p_index.add_argument("--legacy", action="store_true", help="Use legacy format (no analysis integration)")
     add_common_args(p_index)
 
     # status
     p_status = subparsers.add_parser("status", help="Show project status")
     p_status.add_argument("--project", required=True, help="Project directory")
     add_common_args(p_status)
+
+    # analyze
+    p_analyze = subparsers.add_parser("analyze", help="Analyze papers with LLM")
+    p_analyze.add_argument("--project", required=True, help="Project directory")
+    p_analyze.add_argument("--config", help="Path to LLM config file (llm.yaml)")
+    p_analyze.add_argument("--force", action="store_true", help="Re-analyze even if already done")
+    add_common_args(p_analyze)
+
+    # convert
+    p_convert = subparsers.add_parser("convert", help="Convert PDFs to Markdown")
+    p_convert.add_argument("--project", required=True, help="Project directory")
+    p_convert.add_argument("--backend", choices=["pymupdf4llm", "marker"], help="Conversion backend (default: from config or pymupdf4llm)")
+    p_convert.add_argument("--force", action="store_true", help="Re-convert even if already done")
+    p_convert.add_argument("--no-images", action="store_true", help="Don't extract images (marker only)")
+    add_common_args(p_convert)
 
     args = parser.parse_args()
     # Support --json in both global and subcommand positions
@@ -520,6 +673,8 @@ def main() -> int:
         "merge": cmd_merge,
         "dedup": cmd_dedup,
         "download": cmd_download,
+        "convert": cmd_convert,
+        "analyze": cmd_analyze,
         "index": cmd_index,
         "status": cmd_status,
     }

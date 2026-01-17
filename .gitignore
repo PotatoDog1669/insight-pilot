@@ -48,6 +48,7 @@ htmlcov/
 
 # Research projects (user data)
 research/
+llm.yaml
 
 # macOS
 .DS_Store

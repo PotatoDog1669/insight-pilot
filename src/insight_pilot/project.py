@@ -21,6 +21,7 @@ class ProjectContext:
         self.items_path = self.insight_dir / "items.json"
         self.download_failed_path = self.insight_dir / "download_failed.json"
         self.analysis_dir = self.insight_dir / "analysis"
+        self.markdown_dir = self.insight_dir / "markdown"
         self.papers_dir = self.root / "papers"
         self.reports_dir = self.root / "reports"
         self.index_path = self.root / "index.md"

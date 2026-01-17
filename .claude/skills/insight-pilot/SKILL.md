@@ -51,6 +51,8 @@ insight-pilot <command> [options]
 | `merge` | Combine raw results | `--project` | - |
 | `dedup` | Remove duplicates | `--project` | `--dry-run`, `--similarity` |
 | `download` | Fetch PDFs | `--project` | - |
+| `convert` | Convert PDFs to Markdown | `--project` | `--force`, `--no-images` |
+| `analyze` | Analyze papers with LLM | `--project` | `--config`, `--force` |
 | `index` | Generate index.md | `--project` | `--template` |
 | `status` | Check project state | `--project` | - |
 
@@ -66,9 +68,16 @@ insight-pilot status --json --project ./research/myproject
 
 ## Workflow (Agent + CLI 协作)
 
-这是一个 **Agent 与 CLI 协作**的完整工作流程。部分步骤由 CLI 自动完成，部分步骤需要 **Agent 介入审核**。
+这是一个 **Agent 与 CLI 协作**的完整工作流程。
 
-### Phase 1: 搜索与初步筛选
+**执行原则**：
+- 🤖 **AUTO**: 自动执行，无需用户确认
+- ⚠️ **AGENT TASK**: 需要 Agent 介入处理
+- 所有 CLI 命令都是 AUTO，直接执行即可
+
+### Phase 1: 搜索与初步筛选 🤖 AUTO
+
+直接执行以下命令，无需确认：
 
 ```bash
 PROJECT=./research/webagent
@@ -111,7 +120,9 @@ insight-pilot status --json --project $PROJECT
 }
 ```
 
-### Phase 3: 下载 PDF
+### Phase 3: 下载 PDF 🤖 AUTO
+
+直接执行，无需确认：
 
 ```bash
 # Step 5: 下载 PDF（只下载 status != "excluded" 的论文）
@@ -137,19 +148,79 @@ insight-pilot download --project $PROJECT
 
 > **Note**: 高级下载（使用代理/浏览器自动化处理失败项）功能尚未实现，后续版本支持。
 
-### Phase 4: 分析与报告生成 ⚠️ AGENT TASK
+### Phase 4: 转换与分析论文
 
-下载完成后，Agent 需要分析 PDF 内容，生成研究报告。
+**前置条件**：必须先完成 Phase 3 下载 PDF。
 
-**Agent 操作**：
+#### Step 6: PDF 转 Markdown 🤖 AUTO（可选但推荐）
+
+将 PDF 转换为结构化 Markdown，保留表格、公式、图片等格式。支持两种后端：
+
+| 后端 | 速度 | 质量 | 适用场景 |
+|------|------|------|---------|
+| `pymupdf4llm` | ⚡ 快 | 良好 | 大多数论文（默认） |
+| `marker` | 🐢 慢 | 更好 | 复杂表格/公式 |
+
+```bash
+# 默认使用 pymupdf4llm（快速，推荐）
+insight-pilot convert --project $PROJECT
+
+# 使用 marker（更高质量但更慢）
+pip install 'insight-pilot[marker]'  # 需要额外安装
+insight-pilot convert --project $PROJECT --backend marker
+```
+
+**配置后端**：也可以在项目的 `config.yaml` 中配置默认后端：
+
+```yaml
+# $PROJECT/.insight/config.yaml
+topic: "WebAgent Research"
+keywords: [web agent, browser agent]
+
+# PDF 转换配置
+pdf_converter:
+  backend: pymupdf4llm  # 或 "marker"
+  page_chunks: false     # pymupdf4llm 选项
+  use_llm: false         # marker 选项（需 API key）
+```
+
+**转换结果**：
+- Markdown 文件保存到 `$PROJECT/.insight/markdown/{id}/{id}.md`
+- 图片提取到 `$PROJECT/.insight/markdown/{id}/images/`（仅 marker）
+- 元数据保存到 `$PROJECT/.insight/markdown/{id}/metadata.json`
+
+#### Step 7: 分析论文
+
+有两种方式：
+
+##### 方式 A: LLM 自动分析 🤖 AUTO（推荐）
+
+如果配置了 LLM，直接执行：
+
+```bash
+# 用 LLM 分析论文（优先使用已转换的 Markdown，否则回退到 PDF 文本提取）
+insight-pilot analyze --project $PROJECT
+```
+
+**内容来源优先级**：
+1. **Markdown** (from `convert`): 高质量结构化文本，保留表格、公式
+2. **PDF 提取** (PyMuPDF): 基础文本提取，可能丢失格式
+
+**LLM 配置**：创建 `.codex/skills/insight-pilot/llm.yaml`：
+
+```yaml
+provider: openai  # openai / anthropic / ollama
+model: gpt-4o-mini
+api_key: sk-xxx   # 或设置环境变量 OPENAI_API_KEY
+```
+
+##### 方式 B: Agent 手动分析 ⚠️ AGENT TASK
+
+如果未配置 LLM，Agent 需要手动分析：
+
 1. 读取 `papers/` 目录下的 PDF 文件
-2. 对每篇论文提取关键信息：
-   - 核心贡献
-   - 方法论
-   - 实验结果
-   - 与其他论文的关联
-3. 将分析结果写入 `$PROJECT/.insight/analysis/` 目录
-4. 生成/更新研究报告
+2. 对每篇论文提取关键信息
+3. 将分析结果写入 `$PROJECT/.insight/analysis/{id}.json`
 
 **分析文件格式** (`$PROJECT/.insight/analysis/{id}.json`)：
 ```json
@@ -161,7 +232,6 @@ insight-pilot download --project $PROJECT
   "methodology": "方法描述",
   "key_findings": ["发现1", "发现2"],
   "limitations": ["局限性"],
-  "related_to": ["i0003", "i0007"],
   "tags": ["webagent", "benchmark", "multimodal"],
   "analyzed_at": "2026-01-17T12:00:00Z"
 }
@@ -243,9 +313,15 @@ research/myproject/
 │   ├── raw_arxiv.json       # 原始搜索结果
 │   ├── raw_openalex.json
 │   ├── download_failed.json # 下载失败列表（供高级下载重试）
-│   └── analysis/            # 论文分析结果
-│       ├── i0001.json
-│       ├── i0002.json
+│   ├── analysis/            # 论文分析结果
+│   │   ├── i0001.json
+│   │   ├── i0002.json
+│   │   └── ...
+│   └── markdown/            # PDF 转换结果（marker）
+│       ├── i0001/
+│       │   ├── i0001.md     # 转换后的 Markdown
+│       │   ├── metadata.json
+│       │   └── images/      # 提取的图片
 │       └── ...
 ├── papers/                  # 已下载的 PDF
 ├── reports/                 # 历史报告存档
@@ -294,11 +370,18 @@ research/myproject/
 | `NETWORK_ERROR` | API request failed | Yes |
 | `RATE_LIMITED` | API rate limit hit | Yes |
 | `DOWNLOAD_FAILED` | PDF download failed | Yes |
+| `CONVERSION_FAILED` | PDF to Markdown conversion failed | Yes |
+| `MISSING_DEPENDENCY` | Required package not installed | No |
 
 ## Agent Guidelines
 
+**执行原则**：
+- 所有 CLI 命令（init, search, merge, dedup, download, index）都是**自动执行**的，**无需询问用户确认**
+- 只有标记为 ⚠️ AGENT TASK 的步骤需要 Agent 介入处理
+
+**具体指引**：
 1. **Always use `--json` flag** for structured output
-2. **Check status before operations** to understand current state
+2. **直接执行 CLI 命令**：不要询问"是否要下载 PDF？"等确认问题，按工作流顺序执行即可
 3. **审核筛选时**：修改 `items.json` 中的 `status` 和 `exclude_reason` 字段
 4. **分析论文时**：为每篇论文创建 `analysis/{id}.json`
 5. **生成报告时**：基于 `items.json` 和 `analysis/` 目录生成结构化报告

@@ -1,0 +1,19 @@
+# LLM Configuration for paper analysis
+# Copy this file to llm.yaml and configure your API keys
+# If llm.yaml is not present, agent will analyze papers manually
+
+# Provider: openai / anthropic / ollama
+provider: openai
+
+# Model name
+model: gpt-4o-mini
+
+# API Key (or use environment variables: OPENAI_API_KEY / ANTHROPIC_API_KEY)
+api_key: null
+
+# Optional: Custom API endpoint (for proxies or local models like Ollama)
+base_url: null
+
+# Optional: Generation settings
+max_tokens: 2000
+temperature: 0.3

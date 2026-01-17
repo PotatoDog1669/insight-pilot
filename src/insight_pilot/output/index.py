@@ -1,16 +1,12 @@
-"""Generate index.md from items."""
+"""Generate index.md and individual reports from items."""
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    from jinja2 import Environment, FileSystemLoader, select_autoescape
-except ImportError as exc:
-    raise SystemExit(
-        "Missing dependency 'Jinja2'. Install with: pip install insight-pilot"
-    ) from exc
+from insight_pilot.models import ItemData
 
 
 def parse_date(value: str) -> Optional[datetime]:
@@ -23,227 +19,294 @@ def parse_date(value: str) -> Optional[datetime]:
         return None
 
 
-def group_by_date(items: List[Dict[str, object]]) -> Dict[str, List[Dict[str, object]]]:
-    """Group items by publication date."""
-    grouped: Dict[str, List[Dict[str, object]]] = {}
-    for item in items:
-        date = item.get("date") or "Unknown"
-        grouped.setdefault(date, []).append(item)
-    return grouped
+def sort_by_relevance(
+    items: List[Tuple[ItemData, Dict[str, Any]]]
+) -> List[Tuple[ItemData, Dict[str, Any]]]:
+    """Sort items by relevance score (descending), then by date."""
+    def sort_key(pair: Tuple[ItemData, Dict[str, Any]]) -> Tuple[int, str]:
+        item, analysis = pair
+        score = analysis.get("relevance_score", 0)
+        if isinstance(score, str):
+            try:
+                score = int(score)
+            except ValueError:
+                score = 0
+        date = item.date or "0000-00-00"
+        return (-score, date)
+    
+    return sorted(items, key=sort_key)
 
 
-def sort_dates(dates: List[str]) -> List[str]:
-    """Sort dates in descending order."""
-    known: List[Tuple[str, datetime]] = []
-    unknown: List[str] = []
-    for date in dates:
-        parsed = parse_date(date)
-        if parsed:
-            known.append((date, parsed))
-        else:
-            unknown.append(date)
-    known.sort(key=lambda x: x[1], reverse=True)
-    return [date for date, _ in known] + sorted(unknown)
-
-
-def short_text(text: Optional[str], limit: int = 240) -> Optional[str]:
-    """Truncate text to limit."""
-    if not text:
-        return None
-    text = " ".join(text.split())
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3] + "..."
-
-
-def format_sources(item: Dict[str, object]) -> str:
-    """Format source identifiers for display."""
-    identifiers = item.get("identifiers", {}) or {}
-    urls = item.get("urls", {}) or {}
-
-    arxiv_id = identifiers.get("arxiv_id")
-    if arxiv_id:
-        url = urls.get("abstract") or f"https://arxiv.org/abs/{arxiv_id}"
-        return f"[arXiv:{arxiv_id}]({url})"
-
-    doi = identifiers.get("doi")
-    if doi:
-        url = f"https://doi.org/{doi}"
-        return f"[DOI:{doi}]({url})"
-
-    source = item.get("source", "")
-    if isinstance(source, list):
-        return ", ".join(source) if source else "Unknown"
-    return source or "Unknown"
-
-
-def format_authors(item: Dict[str, object]) -> Optional[str]:
-    """Format authors for display."""
-    authors = item.get("authors", []) or []
+def format_authors(authors: List[str], max_count: int = 3) -> str:
+    """Format author list with truncation."""
     if not authors:
+        return "_Unknown_"
+    if len(authors) <= max_count:
+        return ", ".join(authors)
+    return ", ".join(authors[:max_count]) + " et al."
+
+
+def format_sources(item: ItemData) -> str:
+    """Format source links."""
+    links = []
+    if item.arxiv_id:
+        links.append(f"[arXiv](https://arxiv.org/abs/{item.arxiv_id})")
+    if item.doi:
+        links.append(f"[DOI](https://doi.org/{item.doi})")
+    return " | ".join(links) if links else ""
+
+
+def format_tags(tags: List[str], max_count: int = 5) -> str:
+    """Format tags as inline code."""
+    if not tags:
+        return ""
+    display_tags = tags[:max_count]
+    return " ".join(f"`{tag}`" for tag in display_tags)
+
+
+def load_analysis(analysis_dir: Path, item_id: str) -> Optional[Dict[str, Any]]:
+    """Load analysis JSON for an item."""
+    analysis_file = analysis_dir / f"{item_id}.json"
+    if not analysis_file.exists():
         return None
-    display = ", ".join(authors[:3])
-    if len(authors) > 3:
-        display += " et al."
-    return display
+    try:
+        return json.loads(analysis_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, IOError):
+        return None
 
 
-def status_label(status: str) -> Tuple[str, str]:
-    """Get status emoji and label."""
-    mapping = {
-        "success": ("✅", "downloaded"),
-        "pending": ("⏳", "pending"),
-        "failed": ("❌", "failed"),
-        "unavailable": ("⚠️", "unavailable"),
-    }
-    return mapping.get(status, ("⏳", "pending"))
+def generate_analyzed_index(
+    analyzed_items: List[Tuple[ItemData, Dict[str, Any]]],
+    failed_items: List[ItemData],
+    topic: str,
+    keywords: Optional[List[str]] = None,
+) -> str:
+    """Generate index markdown showing only analyzed papers.
+    
+    Args:
+        analyzed_items: List of (item, analysis) tuples for analyzed papers
+        failed_items: List of items that failed to download
+        topic: Research topic
+        keywords: Optional search keywords
+        
+    Returns:
+        Markdown content for index
+    """
+    # Sort by relevance
+    sorted_items = sort_by_relevance(analyzed_items)
+    
+    lines = [
+        f"# {topic}",
+        "",
+        f"> **Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+    ]
+    
+    if keywords:
+        lines.append(f"> **Keywords**: {', '.join(keywords)}")
+    
+    lines.extend([
+        f"> **Analyzed**: {len(analyzed_items)} papers",
+        "",
+        "---",
+        "",
+        "## 📚 Analyzed Papers",
+        "",
+    ])
+    
+    # Generate entry for each analyzed paper
+    for item, analysis in sorted_items:
+        # Extract analysis fields
+        summary = analysis.get("summary", "_No summary_")
+        brief_analysis = analysis.get("brief_analysis", "")
+        tags = analysis.get("tags", [])
+        relevance_score = analysis.get("relevance_score", "N/A")
+        
+        # Paper header with link to detailed report
+        lines.append(f"### [{item.title}](reports/{item.id}.md)")
+        lines.append("")
+        
+        # Metadata line
+        meta_parts = []
+        if item.authors:
+            meta_parts.append(f"**Authors**: {format_authors(item.authors)}")
+        if item.date:
+            meta_parts.append(f"**Date**: {item.date}")
+        source_links = format_sources(item)
+        if source_links:
+            meta_parts.append(f"**Links**: {source_links}")
+        meta_parts.append(f"**Relevance**: {relevance_score}/10")
+        
+        lines.append(" | ".join(meta_parts))
+        lines.append("")
+        
+        # Summary
+        lines.append(f"**Summary**: {summary}")
+        lines.append("")
+        
+        # Brief analysis (if available)
+        if brief_analysis:
+            lines.append(f"> {brief_analysis}")
+            lines.append("")
+        
+        # Tags
+        tag_str = format_tags(tags)
+        if tag_str:
+            lines.append(f"**Tags**: {tag_str}")
+            lines.append("")
+        
+        lines.append("---")
+        lines.append("")
+    
+    # Section for failed downloads
+    if failed_items:
+        lines.extend([
+            "## ⚠️ Papers Not Available",
+            "",
+            "_The following papers could not be downloaded. Only abstracts are shown._",
+            "",
+        ])
+        
+        for item in failed_items:
+            lines.append(f"### {item.title}")
+            lines.append("")
+            
+            meta_parts = []
+            if item.authors:
+                meta_parts.append(f"**Authors**: {format_authors(item.authors, 5)}")
+            if item.date:
+                meta_parts.append(f"**Date**: {item.date}")
+            source_links = format_sources(item)
+            if source_links:
+                meta_parts.append(f"**Links**: {source_links}")
+            
+            if meta_parts:
+                lines.append(" | ".join(meta_parts))
+                lines.append("")
+            
+            if item.abstract:
+                # Truncate long abstracts
+                abstract = item.abstract
+                if len(abstract) > 400:
+                    abstract = abstract[:400] + "..."
+                lines.append(f"> {abstract}")
+                lines.append("")
+            
+            lines.append("---")
+            lines.append("")
+    
+    # Stats section
+    lines.extend([
+        "## 📊 Statistics",
+        "",
+        "| Metric | Value |",
+        "|--------|-------|",
+        f"| Papers Analyzed | {len(analyzed_items)} |",
+        f"| Download Failed | {len(failed_items)} |",
+        f"| Total Processed | {len(analyzed_items) + len(failed_items)} |",
+        "",
+    ])
+    
+    return "\n".join(lines)
 
 
-def build_sections(items: List[Dict[str, object]]) -> List[Dict[str, object]]:
-    """Build sections for template rendering."""
-    grouped = group_by_date(items)
-    sections: List[Dict[str, object]] = []
-
-    for date in sort_dates(list(grouped.keys())):
-        group_items = grouped[date]
-        group_items.sort(
-            key=lambda item: (-(item.get("citation_count") or 0), item.get("title", ""))
-        )
-        formatted_items = []
-        for item in group_items:
-            status = item.get("download_status", "pending")
-            marker, status_text = status_label(status)
-            urls = item.get("urls", {}) or {}
-            pdf_url = urls.get("pdf")
-            local_path = item.get("local_path")
-
-            pdf_line = None
-            if status == "success" and (local_path or pdf_url):
-                local_display = f"[Local]({local_path})" if local_path else ""
-                online_display = f"[Online]({pdf_url})" if pdf_url else ""
-                if local_display and online_display:
-                    pdf_line = f"- **PDF**: {local_display} | {online_display}"
-                elif local_display:
-                    pdf_line = f"- **PDF**: {local_display}"
-                elif online_display:
-                    pdf_line = f"- **PDF**: {online_display}"
-            elif status != "success":
-                online = urls.get("abstract") or urls.get("publisher")
-                if online:
-                    pdf_line = f"- **Online**: [Link]({online})"
-
-            formatted_items.append({
-                "type_label": str(item.get("type", "paper")).title(),
-                "type_emoji": {
-                    "paper": "📄",
-                    "blog": "📝",
-                    "github": "💻",
-                }.get(item.get("type", "paper"), "📄"),
-                "title": item.get("title", "Untitled"),
-                "source_display": format_sources(item),
-                "authors_display": format_authors(item),
-                "date": item.get("date"),
-                "citation_count": item.get("citation_count"),
-                "status_marker": marker,
-                "status_text": status_text,
-                "pdf_line": pdf_line,
-                "abstract_short": short_text(item.get("abstract")),
-            })
-
-        sections.append({"date": date, "items": formatted_items})
-
-    return sections
+def generate_index_with_reports(
+    items: List[ItemData],
+    topic: str,
+    insight_dir: Path,
+    reports_dir: Path,
+    keywords: Optional[List[str]] = None,
+) -> Tuple[str, List[Path]]:
+    """Generate index and individual reports for all analyzed papers.
+    
+    Args:
+        items: All items (filtered to active only)
+        topic: Research topic
+        insight_dir: Path to .insight directory
+        reports_dir: Path to reports directory
+        keywords: Optional search keywords
+        
+    Returns:
+        Tuple of (index_content, list of generated report paths)
+    """
+    from insight_pilot.output.report import save_report
+    
+    analysis_dir = insight_dir / "analysis"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    
+    analyzed_items: List[Tuple[ItemData, Dict[str, Any]]] = []
+    failed_items: List[ItemData] = []
+    generated_reports: List[Path] = []
+    
+    for item in items:
+        # Skip excluded items
+        if item.status == "excluded":
+            continue
+            
+        # Check if analysis exists
+        analysis = load_analysis(analysis_dir, item.id)
+        
+        if analysis:
+            analyzed_items.append((item, analysis))
+            # Generate individual report
+            report_path = save_report(item, analysis, topic, reports_dir)
+            generated_reports.append(report_path)
+        elif item.download_status == "failed":
+            failed_items.append(item)
+    
+    # Generate index
+    index_content = generate_analyzed_index(
+        analyzed_items, failed_items, topic, keywords
+    )
+    
+    return index_content, generated_reports
 
 
-def build_stats(items: List[Dict[str, object]]) -> Dict[str, object]:
-    """Build stats summary."""
-    total = len(items)
-    downloaded = sum(1 for item in items if item.get("download_status") == "success")
-    unavailable = sum(1 for item in items if item.get("download_status") == "unavailable")
-
-    def pct(value: int) -> str:
-        if total == 0:
-            return "0.0%"
-        return f"{value / total * 100:.1f}%"
-
-    return {
-        "total": total,
-        "downloaded": downloaded,
-        "unavailable": unavailable,
-        "downloaded_pct": pct(downloaded),
-        "unavailable_pct": pct(unavailable),
-    }
-
-
-# Default template content
-DEFAULT_TEMPLATE = '''# {{ topic }} Research Index
-
-{% if keywords %}> **Keywords**: {{ keywords | join(", ") }}  
-{% endif %}> **Generated**: {{ generated_at }}  
-> **Total**: {{ stats.total }} items ({{ stats.downloaded }} downloaded, {{ stats.unavailable }} metadata only)
-
----
-
-{% for section in sections %}## {{ section.date }} ({{ section["items"] | length }} items)
-
-{% for item in section["items"] %}### {{ item.type_emoji }} [{{ item.type_label }}] {{ item.title }}
-- **Source**: {{ item.source_display }}
-{% if item.authors_display %}- **Authors**: {{ item.authors_display }}
-{% endif %}{% if item.date %}- **Date**: {{ item.date }}
-{% endif %}{% if item.citation_count is not none %}- **Citations**: {{ item.citation_count }}
-{% endif %}- **Status**: {{ item.status_marker }} {{ item.status_text }}
-{% if item.pdf_line %}{{ item.pdf_line }}
-{% endif %}{% if item.abstract_short %}- **Abstract**: {{ item.abstract_short }}
-{% endif %}
-
-{% endfor %}{% endfor %}---
-
-## Stats
-
-| Category | Count | Percent |
-| --- | --- | --- |
-| Downloaded | {{ stats.downloaded }} | {{ stats.downloaded_pct }} |
-| Unavailable | {{ stats.unavailable }} | {{ stats.unavailable_pct }} |
-'''
-
-
+# Legacy function for backward compatibility
 def generate_index(
     items: List[Dict[str, object]],
     topic: str,
     keywords: Optional[List[str]] = None,
     template_path: Optional[Path] = None,
 ) -> str:
-    """Generate index markdown content.
+    """Generate index markdown content (legacy format).
     
-    Args:
-        items: List of items
-        topic: Research topic
-        keywords: Optional list of keywords
-        template_path: Optional custom template path
-        
-    Returns:
-        Rendered markdown string
+    This is kept for backward compatibility. For the new format with
+    analysis integration, use generate_index_with_reports().
     """
-    if template_path and template_path.exists():
-        env = Environment(
-            loader=FileSystemLoader(str(template_path.parent)),
-            autoescape=select_autoescape(),
-            trim_blocks=True,
-            lstrip_blocks=True,
-        )
-        template = env.get_template(template_path.name)
-    else:
-        from jinja2 import Template
-        template = Template(DEFAULT_TEMPLATE)
-        template.environment.trim_blocks = True
-        template.environment.lstrip_blocks = True
-
-    rendered = template.render(
-        topic=topic,
-        keywords=keywords or [],
-        generated_at=datetime.now().strftime("%Y-%m-%d"),
-        stats=build_stats(items),
-        sections=build_sections(items),
-    )
-
-    return rendered.rstrip() + "\n"
+    # Convert dicts to ItemData if needed
+    item_objects = []
+    for item in items:
+        if isinstance(item, dict):
+            item_objects.append(ItemData.from_dict(item))
+        else:
+            item_objects.append(item)
+    
+    # Use simple format without analysis
+    lines = [
+        f"# {topic}",
+        "",
+        f"> **Generated**: {datetime.now().strftime('%Y-%m-%d')}",
+        f"> **Total**: {len(items)} items",
+        "",
+    ]
+    
+    if keywords:
+        lines.append(f"> **Keywords**: {', '.join(keywords)}")
+        lines.append("")
+    
+    lines.append("---")
+    lines.append("")
+    
+    for item in item_objects:
+        lines.append(f"### {item.title}")
+        if item.authors:
+            lines.append(f"- **Authors**: {format_authors(item.authors)}")
+        if item.date:
+            lines.append(f"- **Date**: {item.date}")
+        lines.append(f"- **Status**: {item.download_status or 'pending'}")
+        if item.abstract:
+            abstract = item.abstract[:200] + "..." if len(item.abstract) > 200 else item.abstract
+            lines.append(f"- **Abstract**: {abstract}")
+        lines.append("")
+    
+    return "\n".join(lines)
