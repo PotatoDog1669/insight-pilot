@@ -12,43 +12,43 @@ from insight_pilot.models import utc_now_iso
 
 
 # Default analysis prompt template
-DEFAULT_PROMPT = """You are a research paper analyst. Analyze the following paper and provide a comprehensive analysis.
+DEFAULT_PROMPT = """你是一位学术论文分析专家。请用中文分析以下论文并提供全面的评估。
 
-**Title**: {title}
-**Authors**: {authors}
-**Date**: {date}
-**Abstract**: {abstract}
+**标题**: {title}
+**作者**: {authors}
+**日期**: {date}
+**摘要**: {abstract}
 
 {pdf_content}
 
-Please provide a structured analysis in JSON format with the following fields:
+请以 JSON 格式提供结构化分析，包含以下字段：
 
-1. **summary**: A one-sentence summary of the paper (max 50 words, same language as title)
+1. **summary**: 一句话总结论文核心内容（最多50词，与标题语言一致）
 
-2. **brief_analysis**: A concise 2-3 sentence analysis highlighting the core contribution and significance (max 100 words, same language as title)
+2. **brief_analysis**: 简要分析，2-3句话突出核心贡献和意义（最多100词，与标题语言一致）
 
-3. **detailed_analysis**: A comprehensive analysis (300-500 words, same language as title) covering:
-   - Research problem and motivation
-   - Proposed approach/method
-   - Key innovations and contributions
-   - Experimental results and findings
-   - Significance and impact
+3. **detailed_analysis**: 深入分析（300-500词，与标题语言一致），涵盖：
+   - 研究问题与动机
+   - 提出的方法/途径
+   - 关键创新点与贡献
+   - 实验结果与发现
+   - 意义与影响
 
-4. **contributions**: List of main contributions (3-5 items, concise bullet points)
+4. **contributions**: 主要贡献列表（3-5条，简洁要点）
 
-5. **methodology**: Brief description of the methodology used (1-2 sentences)
+5. **methodology**: 所用方法的简要描述（1-2句话）
 
-6. **key_findings**: List of key findings/results (3-5 items)
+6. **key_findings**: 关键发现/结果列表（3-5条）
 
-7. **limitations**: List of limitations mentioned or apparent (1-3 items)
+7. **limitations**: 论文提到的或明显的局限性（1-3条）
 
-8. **future_work**: Potential future research directions (1-3 items)
+8. **future_work**: 潜在的未来研究方向（1-3条）
 
-9. **tags**: List of relevant tags/keywords (5-10 items)
+9. **tags**: 相关标签/关键词列表（5-10个）
 
-10. **relevance_score**: Rate the paper's relevance to the research topic (1-10)
+10. **relevance_score**: 论文与研究主题的相关性评分（1-10分）
 
-Respond with valid JSON only, no markdown formatting."""
+只返回有效的 JSON，不要使用 markdown 格式。"""
 
 
 def load_llm_config(config_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:

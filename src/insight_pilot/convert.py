@@ -1,16 +1,12 @@
 """PDF to Markdown conversion module.
 
-Supports multiple conversion backends:
+Uses a single conversion backend:
 - pymupdf4llm: Fast, lightweight, good for most papers (default)
-- marker: Higher quality, better table/equation support, but slower
 
 Configuration via config.yaml:
     pdf_converter:
-        backend: pymupdf4llm  # or "marker"
         # pymupdf4llm options
         page_chunks: false
-        # marker options (only when backend=marker)
-        use_llm: false
 """
 from __future__ import annotations
 
@@ -31,9 +27,7 @@ def load_convert_config(project_dir: Path) -> Dict[str, Any]:
         Config dict with defaults applied
     """
     defaults = {
-        "backend": "pymupdf4llm",  # default to faster option
         "page_chunks": False,
-        "use_llm": False,
     }
     
     config_path = project_dir / ".insight" / "config.yaml"
@@ -42,7 +36,9 @@ def load_convert_config(project_dir: Path) -> Dict[str, Any]:
             config = yaml.safe_load(f) or {}
         
         pdf_config = config.get("pdf_converter", {})
-        defaults.update(pdf_config)
+        defaults.update({
+            "page_chunks": pdf_config.get("page_chunks", False),
+        })
     
     return defaults
 
@@ -51,15 +47,6 @@ def check_pymupdf4llm_available() -> bool:
     """Check if pymupdf4llm is installed."""
     try:
         import pymupdf4llm
-        return True
-    except ImportError:
-        return False
-
-
-def check_marker_available() -> bool:
-    """Check if marker-pdf is installed."""
-    try:
-        from marker.converters.pdf import PdfConverter
         return True
     except ImportError:
         return False
@@ -96,120 +83,40 @@ def convert_with_pymupdf4llm(
     }
 
 
-def convert_with_marker(
-    pdf_path: Path,
-    output_dir: Optional[Path] = None,
-    save_images: bool = True,
-    use_llm: bool = False,
-) -> Dict[str, Any]:
-    """Convert PDF to markdown using marker-pdf.
-    
-    Args:
-        pdf_path: Path to PDF file
-        output_dir: Directory to save images
-        save_images: Whether to extract and save images
-        use_llm: Whether to use LLM for better accuracy
-        
-    Returns:
-        Dict with 'markdown', 'metadata', 'images' keys
-    """
-    from marker.converters.pdf import PdfConverter
-    from marker.models import create_model_dict
-    from marker.output import text_from_rendered
-    
-    # Create converter
-    converter = PdfConverter(
-        artifact_dict=create_model_dict(),
-    )
-    
-    # Convert PDF
-    rendered = converter(str(pdf_path))
-    
-    # Extract text and images
-    markdown_text, _, images = text_from_rendered(rendered)
-    
-    # Save images if requested
-    saved_images: Dict[str, str] = {}
-    if save_images and images and output_dir:
-        images_dir = output_dir / "images"
-        images_dir.mkdir(exist_ok=True)
-        
-        for img_name, img_data in images.items():
-            img_path = images_dir / img_name
-            with open(img_path, "wb") as f:
-                f.write(img_data)
-            saved_images[img_name] = str(img_path.relative_to(output_dir))
-    
-    # Get metadata
-    metadata = {"converter": "marker"}
-    if hasattr(rendered, "metadata"):
-        metadata["marker_metadata"] = rendered.metadata
-    
-    return {
-        "markdown": markdown_text,
-        "metadata": metadata,
-        "images": saved_images,
-    }
-
-
 def convert_pdf_to_markdown(
     pdf_path: Path,
-    output_dir: Optional[Path] = None,
-    backend: str = "pymupdf4llm",
-    save_images: bool = True,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Convert a single PDF to markdown.
+    """Convert a single PDF to markdown using pymupdf4llm.
     
     Args:
         pdf_path: Path to PDF file
-        output_dir: Directory to save output (for marker images)
-        backend: Conversion backend ("pymupdf4llm" or "marker")
-        save_images: Whether to extract and save images (marker only)
-        **kwargs: Additional backend-specific options
+        **kwargs: Additional pymupdf4llm options
         
     Returns:
         Dict with 'markdown', 'metadata', 'images' keys
         
     Raises:
-        ImportError: If required backend is not installed
+        ImportError: If pymupdf4llm is not installed
         FileNotFoundError: If PDF doesn't exist
     """
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
     
-    if backend == "pymupdf4llm":
-        if not check_pymupdf4llm_available():
-            raise ImportError(
-                "pymupdf4llm is not installed. Install with: pip install pymupdf4llm"
-            )
-        return convert_with_pymupdf4llm(
-            pdf_path,
-            page_chunks=kwargs.get("page_chunks", False),
+    if not check_pymupdf4llm_available():
+        raise ImportError(
+            "pymupdf4llm is not installed. Install with: pip install pymupdf4llm"
         )
-    
-    elif backend == "marker":
-        if not check_marker_available():
-            raise ImportError(
-                "marker-pdf is not installed. Install with: pip install marker-pdf"
-            )
-        return convert_with_marker(
-            pdf_path,
-            output_dir=output_dir,
-            save_images=save_images,
-            use_llm=kwargs.get("use_llm", False),
-        )
-    
-    else:
-        raise ValueError(f"Unknown backend: {backend}. Use 'pymupdf4llm' or 'marker'")
+    return convert_with_pymupdf4llm(
+        pdf_path,
+        page_chunks=kwargs.get("page_chunks", False),
+    )
 
 
 def convert_paper(
     item: Dict[str, Any],
     project_dir: Path,
     markdown_dir: Path,
-    backend: str = "pymupdf4llm",
-    save_images: bool = True,
     **kwargs,
 ) -> Dict[str, Any]:
     """Convert a downloaded paper's PDF to markdown.
@@ -255,9 +162,6 @@ def convert_paper(
     try:
         result = convert_pdf_to_markdown(
             pdf_path,
-            output_dir=output_dir,
-            backend=backend,
-            save_images=save_images,
             **kwargs,
         )
         
@@ -284,7 +188,7 @@ def convert_paper(
                 "title": item.get("title"),
                 "source_pdf": str(local_path),
                 "markdown_path": str(md_path),
-                "backend": backend,
+                "backend": "pymupdf4llm",
                 "images": result["images"],
                 "converter_metadata": result["metadata"],
             }, f, indent=2, ensure_ascii=False)
@@ -294,7 +198,7 @@ def convert_paper(
             "id": item_id,
             "markdown_path": str(md_path),
             "metadata_path": str(meta_path),
-            "backend": backend,
+            "backend": "pymupdf4llm",
             "images_count": len(result["images"]),
         }
         
@@ -319,8 +223,6 @@ def convert_papers(
     project_dir: Path,
     markdown_dir: Path,
     skip_existing: bool = True,
-    backend: Optional[str] = None,
-    save_images: bool = True,
     **kwargs,
 ) -> Dict[str, Any]:
     """Convert multiple papers to markdown.
@@ -337,25 +239,14 @@ def convert_papers(
     Returns:
         Stats dict with conversion results
     """
-    # Load config if backend not specified
-    if backend is None:
-        config = load_convert_config(project_dir)
-        backend = config.get("backend", "pymupdf4llm")
-        kwargs.setdefault("page_chunks", config.get("page_chunks", False))
-        kwargs.setdefault("use_llm", config.get("use_llm", False))
+    config = load_convert_config(project_dir)
+    kwargs.setdefault("page_chunks", config.get("page_chunks", False))
     
-    # Check backend availability
-    if backend == "pymupdf4llm" and not check_pymupdf4llm_available():
+    if not check_pymupdf4llm_available():
         return {
             "status": "failed",
             "reason": "missing_dependency",
             "message": "pymupdf4llm is not installed. Install with: pip install pymupdf4llm",
-        }
-    elif backend == "marker" and not check_marker_available():
-        return {
-            "status": "failed",
-            "reason": "missing_dependency",
-            "message": "marker-pdf is not installed. Install with: pip install 'insight-pilot[marker]'",
         }
     
     markdown_dir.mkdir(parents=True, exist_ok=True)
@@ -402,8 +293,6 @@ def convert_papers(
             item,
             project_dir,
             markdown_dir,
-            backend=backend,
-            save_images=save_images,
             **kwargs,
         )
         results.append(result)
@@ -415,7 +304,7 @@ def convert_papers(
     
     return {
         "status": "completed",
-        "backend": backend,
+        "backend": "pymupdf4llm",
         "stats": stats,
         "results": results,
     }

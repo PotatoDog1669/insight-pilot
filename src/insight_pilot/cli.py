@@ -6,10 +6,8 @@ Usage:
 
 Commands:
     init        Initialize a research project
-    search      Search papers from sources
-    merge       Merge search results
-    dedup       Deduplicate items
-    download    Download PDFs
+    search      Search, merge and deduplicate papers
+    download    Download PDFs and convert to Markdown
     analyze     Analyze papers with LLM
     index       Generate index.md
     status      Show project status
@@ -156,7 +154,11 @@ def cmd_init(args: argparse.Namespace, formatter: OutputFormatter) -> int:
 
 
 def cmd_search(args: argparse.Namespace, formatter: OutputFormatter) -> int:
-    """Search papers from a source."""
+    """Search papers from sources, merge and deduplicate.
+    
+    This unified command replaces the separate search/merge/dedup workflow.
+    Supports multiple sources with automatic merge and deduplication.
+    """
     ctx = ProjectContext(Path(args.project))
 
     if not ctx.exists():
@@ -168,68 +170,121 @@ def cmd_search(args: argparse.Namespace, formatter: OutputFormatter) -> int:
 
     load_env_for_project(ctx.root)
 
-    source = args.source.lower()
-    output_file = ctx.insight_dir / f"raw_{source}.json"
-
-    formatter.info(f"Searching {source} for '{args.query}'...")
-
-    try:
-        if source == "arxiv":
-            from insight_pilot.search.arxiv import search
-
-            # Convert dates from YYYY-MM-DD to YYYYMMDD
-            submitted_from = args.since.replace("-", "") if args.since else None
-            submitted_to = args.until.replace("-", "") if args.until else None
-
-            results = search(
-                query=args.query,
-                limit=args.limit,
-                submitted_from=submitted_from,
-                submitted_to=submitted_to,
-                max_retries=3,
-            )
-        elif source == "openalex":
-            from insight_pilot.search.openalex import search
-
-            mailto = os.getenv("OPENALEX_MAILTO", "")
-            results = search(
-                query=args.query,
-                limit=args.limit,
-                since=args.since,
-                until=args.until,
-                mailto=mailto,
-                title_only=getattr(args, "title_only", False),
-                max_retries=3,
-            )
-        else:
+    # Normalize sources
+    sources = args.source if isinstance(args.source, list) else [args.source]
+    sources = [s.lower() for s in sources]
+    
+    # Handle 'all' keyword
+    if "all" in sources:
+        sources = ["arxiv", "openalex"]
+    
+    # Validate sources
+    valid_sources = {"arxiv", "openalex"}
+    for source in sources:
+        if source not in valid_sources:
             formatter.error(
-                f"Unknown source: {source}. Available: arxiv, openalex",
+                f"Unknown source: {source}. Available: arxiv, openalex, all",
                 ErrorCode.INVALID_SOURCE.value,
             )
             return 1
 
-        # Save results
-        payload = {
-            "source": source,
-            "query": args.query,
-            "timestamp": utc_now_iso(),
-            "results": results,
-            "error": None,
-        }
-        with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+    all_results = []
+    
+    try:
+        # Search each source
+        for source in sources:
+            output_file = ctx.insight_dir / f"raw_{source}.json"
+            formatter.info(f"Searching {source} for '{args.query}'...")
 
-        # Update state
-        state = ctx.load_state()
-        if source not in state.get("sources_used", []):
-            state.setdefault("sources_used", []).append(source)
+            if source == "arxiv":
+                from insight_pilot.search.arxiv import search
+
+                # Convert dates from YYYY-MM-DD to YYYYMMDD
+                submitted_from = args.since.replace("-", "") if args.since else None
+                submitted_to = args.until.replace("-", "") if args.until else None
+
+                results = search(
+                    query=args.query,
+                    limit=args.limit,
+                    submitted_from=submitted_from,
+                    submitted_to=submitted_to,
+                    max_retries=3,
+                )
+            elif source == "openalex":
+                from insight_pilot.search.openalex import search
+
+                mailto = os.getenv("OPENALEX_MAILTO", "")
+                results = search(
+                    query=args.query,
+                    limit=args.limit,
+                    since=args.since,
+                    until=args.until,
+                    mailto=mailto,
+                    title_only=getattr(args, "title_only", False),
+                    max_retries=3,
+                )
+
+            # Save raw results
+            payload = {
+                "source": source,
+                "query": args.query,
+                "timestamp": utc_now_iso(),
+                "results": results,
+                "error": None,
+            }
+            with open(output_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+
+            formatter.info(f"Found {len(results)} papers from {source}")
+            all_results.extend(results)
+
+            # Update state with source
+            state = ctx.load_state()
+            if source not in state.get("sources_used", []):
+                state.setdefault("sources_used", []).append(source)
+                ctx.save_state(state)
+
+        # Merge results
+        from insight_pilot.process.merge import merge_results, save_items
+
+        raw_files = ctx.get_raw_files()
+        if raw_files:
+            formatter.info(f"Merging {len(raw_files)} result files...")
+            items = merge_results(raw_files)
+            save_items(items, ctx.items_path)
+
+            # Update state
+            state = ctx.load_state()
+            state["total_items"] = len(items)
             ctx.save_state(state)
 
-        formatter.success(f"Found {len(results)} papers from {source}", {
-            "source": source,
-            "count": len(results),
-            "output_file": str(output_file),
-        })
+            # Deduplicate
+            from insight_pilot.process.dedup import dedup
+
+            deduped, stats = dedup(items, 0.9)  # Similarity threshold hardcoded
+            ctx.save_items(deduped)
+
+            # Update state
+            state = ctx.load_state()
+            state["total_items"] = len(deduped)
+            ctx.save_state(state)
+
+            formatter.success(
+                f"Search complete: {len(all_results)} found → {len(items)} merged → {len(deduped)} after dedup",
+                {
+                    "sources": sources,
+                    "raw_count": len(all_results),
+                    "merged_count": len(items),
+                    "final_count": len(deduped),
+                    "duplicates_removed": stats["duplicates"],
+                },
+            )
+        else:
+            formatter.success(f"Search complete: {len(all_results)} papers found", {
+                "sources": sources,
+                "count": len(all_results),
+            })
+
         return 0
 
     except SkillError as e:
@@ -240,77 +295,17 @@ def cmd_search(args: argparse.Namespace, formatter: OutputFormatter) -> int:
         return 1
 
 
-def cmd_merge(args: argparse.Namespace, formatter: OutputFormatter) -> int:
-    """Merge search results into items.json."""
-    ctx = ProjectContext(Path(args.project))
-
-    if not ctx.exists():
-        formatter.error(f"Project not found at {args.project}", ErrorCode.PROJECT_NOT_FOUND.value)
-        return 1
-
-    raw_files = ctx.get_raw_files()
-    if not raw_files:
-        formatter.error(
-            "No raw_*.json files found. Run 'search' first.",
-            ErrorCode.NO_INPUT_FILES.value,
-        )
-        return 1
-
-    formatter.info(f"Merging {len(raw_files)} result files...")
-
-    from insight_pilot.process.merge import merge_results, save_items
-
-    items = merge_results(raw_files)
-    save_items(items, ctx.items_path)
-
-    # Update state
-    state = ctx.load_state()
-    state["total_items"] = len(items)
-    ctx.save_state(state)
-
-    formatter.success(f"Merged {len(items)} items", {"count": len(items)})
-    return 0
-
-
-def cmd_dedup(args: argparse.Namespace, formatter: OutputFormatter) -> int:
-    """Deduplicate items."""
-    ctx = ProjectContext(Path(args.project))
-
-    if not ctx.items_path.exists():
-        formatter.error("items.json not found. Run 'merge' first.", ErrorCode.NO_ITEMS_FILE.value)
-        return 1
-
-    from insight_pilot.process.dedup import dedup
-
-    items = ctx.load_items()
-    deduped, stats = dedup(items, args.similarity)
-
-    if args.dry_run:
-        formatter.info(f"Dry run: would deduplicate {stats['original']} → {stats['final']} items")
-        if formatter.json_output:
-            print(json.dumps(stats, indent=2))
-        return 0
-
-    ctx.save_items(deduped)
-
-    # Update state
-    state = ctx.load_state()
-    state["total_items"] = len(deduped)
-    ctx.save_state(state)
-
-    formatter.success(
-        f"Deduplicated: {stats['original']} → {stats['final']} ({stats['duplicates']} removed)",
-        stats,
-    )
-    return 0
-
 
 def cmd_download(args: argparse.Namespace, formatter: OutputFormatter) -> int:
-    """Download PDFs."""
+    """Download PDFs and convert to Markdown.
+    
+    This unified command downloads PDFs and automatically converts them
+    to Markdown format using pymupdf4llm.
+    """
     ctx = ProjectContext(Path(args.project))
 
     if not ctx.items_path.exists():
-        formatter.error("items.json not found. Run 'merge' first.", ErrorCode.NO_ITEMS_FILE.value)
+        formatter.error("items.json not found. Run 'search' first.", ErrorCode.NO_ITEMS_FILE.value)
         return 1
 
     from insight_pilot.download.direct import download_pdfs
@@ -339,19 +334,51 @@ def cmd_download(args: argparse.Namespace, formatter: OutputFormatter) -> int:
             for p in pending_items
         ]
         ctx.save_download_failed(failed_items)
-        formatter.info(f"Saved {len(failed_items)} failed items to download_failed.json for L2 processing")
+        formatter.info(f"Saved {len(failed_items)} failed items to download_failed.json")
 
     # Update state
     state = ctx.load_state()
     state["download_stats"] = result["l1_stats"]
     ctx.save_state(state)
 
-    stats = result["l1_stats"]
-    excluded = stats.get("excluded", 0)
-    formatter.success(
-        f"Downloaded: {stats['success']} success, {stats['failed']} failed, {stats['unavailable']} unavailable, {excluded} excluded",
-        stats,
+    dl_stats = result["l1_stats"]
+    excluded = dl_stats.get("excluded", 0)
+    formatter.info(
+        f"Downloaded: {dl_stats['success']} success, {dl_stats['failed']} failed, {dl_stats['unavailable']} unavailable, {excluded} excluded"
     )
+
+    # Convert PDFs to Markdown
+    from insight_pilot.convert import convert_papers
+
+    downloaded_count = sum(1 for it in items if it.get("download_status") == "success")
+    if downloaded_count > 0:
+        formatter.info(f"Converting {downloaded_count} PDFs to Markdown...")
+
+        convert_result = convert_papers(
+            items,
+            ctx.root,
+            ctx.markdown_dir,
+            skip_existing=True,
+        )
+
+        if convert_result.get("status") == "failed":
+            formatter.error(convert_result.get("message", "Conversion failed"), ErrorCode.CONVERSION_FAILED.value)
+            return 1
+
+        conv_stats = convert_result.get("stats", {})
+        formatter.success(
+            f"Complete: {dl_stats['success']} downloaded, {conv_stats.get('success', 0)} converted to Markdown",
+            {
+                "download": dl_stats,
+                "convert": conv_stats,
+            },
+        )
+    else:
+        formatter.success(
+            f"Download complete: {dl_stats['success']} success, {dl_stats['failed']} failed",
+            dl_stats,
+        )
+
     return 0
 
 
@@ -401,8 +428,10 @@ def cmd_index(args: argparse.Namespace, formatter: OutputFormatter) -> int:
         )
     else:
         # Use legacy format (no analysis)
+        # Filter to active items only for legacy format too
+        active_items_data = [item for item in items_data if item.get("status") != "excluded"]
         template_path = Path(args.template) if args.template else None
-        content = generate_index(items_data, topic, keywords, template_path)
+        content = generate_index(active_items_data, topic, keywords, template_path)
 
         with open(ctx.index_path, "w", encoding="utf-8") as f:
             f.write(content)
@@ -541,49 +570,6 @@ def cmd_analyze(args: argparse.Namespace, formatter: OutputFormatter) -> int:
     return 0
 
 
-def cmd_convert(args: argparse.Namespace, formatter: OutputFormatter) -> int:
-    """Convert PDFs to Markdown."""
-    ctx = ProjectContext(Path(args.project))
-
-    if not ctx.exists():
-        formatter.error(f"Project not found at {args.project}", ErrorCode.PROJECT_NOT_FOUND.value)
-        return 1
-
-    if not ctx.items_path.exists():
-        formatter.error("items.json not found. Run 'merge' first.", ErrorCode.NO_ITEMS_FILE.value)
-        return 1
-
-    from insight_pilot.convert import convert_papers
-
-    items = ctx.load_items()
-    downloaded = sum(1 for it in items if it.get("download_status") == "success")
-    
-    # Get backend from args or use default (will be loaded from config)
-    backend = getattr(args, 'backend', None)
-    backend_info = f" using {backend}" if backend else ""
-    formatter.info(f"Converting {downloaded} PDFs to Markdown{backend_info}...")
-
-    result = convert_papers(
-        items,
-        ctx.root,
-        ctx.markdown_dir,
-        skip_existing=not args.force,
-        backend=backend,
-        save_images=not args.no_images,
-    )
-
-    if result.get("status") == "failed":
-        formatter.error(result.get("message", "Conversion failed"), ErrorCode.CONVERSION_FAILED.value)
-        return 1
-
-    stats = result.get("stats", {})
-    used_backend = result.get("backend", "unknown")
-    formatter.success(
-        f"Conversion complete ({used_backend}): {stats.get('success', 0)} success, {stats.get('failed', 0)} failed, {stats.get('skipped', 0)} skipped",
-        result,
-    )
-    return 0
-
 
 def main() -> int:
     """Main entry point."""
@@ -608,33 +594,21 @@ def main() -> int:
     add_common_args(p_init)
 
     # search
-    p_search = subparsers.add_parser("search", help="Search papers from a source")
+    p_search = subparsers.add_parser("search", help="Search, merge and deduplicate papers")
     p_search.add_argument("--project", required=True, help="Project directory")
-    p_search.add_argument("--source", required=True, choices=["arxiv", "openalex"])
+    p_search.add_argument("--source", required=True, nargs="+", help="Source(s): arxiv, openalex, or 'all'")
     p_search.add_argument("--query", required=True, help="Search query")
-    p_search.add_argument("--limit", type=int, default=50)
+    p_search.add_argument("--limit", type=int, default=50, help="Max results per source")
     p_search.add_argument("--since", help="Start date (YYYY-MM-DD)")
     p_search.add_argument("--until", help="End date (YYYY-MM-DD)")
     p_search.add_argument("--title-only", action="store_true", help="Search title only (OpenAlex)")
     add_common_args(p_search)
 
-    # merge
-    p_merge = subparsers.add_parser("merge", help="Merge search results")
-    p_merge.add_argument("--project", required=True, help="Project directory")
-    add_common_args(p_merge)
-
-    # dedup
-    p_dedup = subparsers.add_parser("dedup", help="Deduplicate items")
-    p_dedup.add_argument("--project", required=True, help="Project directory")
-    p_dedup.add_argument("--dry-run", action="store_true")
-    p_dedup.add_argument("--similarity", type=float, default=0.9)
-    add_common_args(p_dedup)
 
     # download
-    p_download = subparsers.add_parser("download", help="Download PDFs")
+    p_download = subparsers.add_parser("download", help="Download PDFs and convert to Markdown")
     p_download.add_argument("--project", required=True, help="Project directory")
     add_common_args(p_download)
-
     # index
     p_index = subparsers.add_parser("index", help="Generate index.md and reports")
     p_index.add_argument("--project", required=True, help="Project directory")
@@ -654,13 +628,6 @@ def main() -> int:
     p_analyze.add_argument("--force", action="store_true", help="Re-analyze even if already done")
     add_common_args(p_analyze)
 
-    # convert
-    p_convert = subparsers.add_parser("convert", help="Convert PDFs to Markdown")
-    p_convert.add_argument("--project", required=True, help="Project directory")
-    p_convert.add_argument("--backend", choices=["pymupdf4llm", "marker"], help="Conversion backend (default: from config or pymupdf4llm)")
-    p_convert.add_argument("--force", action="store_true", help="Re-convert even if already done")
-    p_convert.add_argument("--no-images", action="store_true", help="Don't extract images (marker only)")
-    add_common_args(p_convert)
 
     args = parser.parse_args()
     # Support --json in both global and subcommand positions
@@ -670,10 +637,7 @@ def main() -> int:
     commands = {
         "init": cmd_init,
         "search": cmd_search,
-        "merge": cmd_merge,
-        "dedup": cmd_dedup,
         "download": cmd_download,
-        "convert": cmd_convert,
         "analyze": cmd_analyze,
         "index": cmd_index,
         "status": cmd_status,

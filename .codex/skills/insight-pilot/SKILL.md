@@ -8,25 +8,15 @@ version: 0.3.0
 
 A workflow automation skill for literature research. Searches arXiv and OpenAlex, deduplicates results, downloads PDFs, analyzes content, and generates incremental research reports.
 
-## Setup (One-Time)
+## Setup
 
-Create a virtual environment and install the package:
-
-```bash
-# Create venv for insight-pilot
-python3 -m venv ~/.insight-pilot-venv
-
-# Activate and install
-source ~/.insight-pilot-venv/bin/activate
-pip install git+https://github.com/PotatoDog1669/insight-pilot.git
-```
-
-If the GitHub package is not available, install from local repository:
+Run the bootstrap script (automatically checks environment, creates and installs if missing):
 
 ```bash
-source ~/.insight-pilot-venv/bin/activate
-pip install -e /path/to/insight-pilot  # Replace with actual repo path
+bash .codex/skills/insight-pilot/scripts/bootstrap_env.sh
 ```
+
+The script automatically detects if `~/.insight-pilot-venv` exists and if packages are installed, only installing when necessary. See `--help` for advanced options.
 
 ## Usage
 
@@ -47,11 +37,8 @@ insight-pilot <command> [options]
 | Command | Purpose | Required Args | Key Optional Args |
 |---------|---------|---------------|-------------------|
 | `init` | Create research project | `--topic`, `--output` | `--keywords` |
-| `search` | Search single source | `--project`, `--source`, `--query` | `--limit`, `--since`, `--until` |
-| `merge` | Combine raw results | `--project` | - |
-| `dedup` | Remove duplicates | `--project` | `--dry-run`, `--similarity` |
-| `download` | Fetch PDFs | `--project` | - |
-| `convert` | Convert PDFs to Markdown | `--project` | `--force`, `--no-images` |
+| `search` | Search, merge and dedup | `--project`, `--source`, `--query` | `--limit`, `--since`, `--until` |
+| `download` | Download PDFs + convert to Markdown | `--project` | - |
 | `analyze` | Analyze papers with LLM | `--project` | `--config`, `--force` |
 | `index` | Generate index.md | `--project` | `--template` |
 | `status` | Check project state | `--project` | - |
@@ -66,50 +53,42 @@ insight-pilot status --json --project ./research/myproject
 
 ---
 
-## Workflow (Agent + CLI 协作)
+## Workflow (Agent + CLI Collaboration)
 
-这是一个 **Agent 与 CLI 协作**的完整工作流程。
+This is the complete workflow for **Agent + CLI collaboration**.
 
-**执行原则**：
-- 🤖 **AUTO**: 自动执行，无需用户确认
-- ⚠️ **AGENT TASK**: 需要 Agent 介入处理
-- 所有 CLI 命令都是 AUTO，直接执行即可
+**Execution Principles**:
+- Run CLI commands in sequence as prescribed, no line-by-line confirmation needed.
+- Agent intervention is ONLY required in Phase 2 for manual review (checking `items.json` and setting `status`/`exclude_reason`).
 
-### Phase 1: 搜索与初步筛选 🤖 AUTO
+### Phase 1: Search and Initial Filtering
 
-直接执行以下命令，无需确认：
+Execute the following commands directly, no confirmation needed:
 
 ```bash
 PROJECT=./research/webagent
 
-# Step 1: 初始化项目
+# Step 1: Initialize project
 insight-pilot init --topic "WebAgent Research" --keywords "web agent,browser agent" --output $PROJECT
 
-# Step 2: 搜索多个数据源
-insight-pilot search --project $PROJECT --source arxiv --query "web agent" --limit 50
-insight-pilot search --project $PROJECT --source openalex --query "web agent" --limit 50
-
-# Step 3: 合并搜索结果
-insight-pilot merge --project $PROJECT
-
-# Step 4: 自动去重（基于 DOI/arXiv ID/标题相似度）
-insight-pilot dedup --project $PROJECT
+# Step 2: Search multiple sources (auto merge & dedup)
+insight-pilot search --project $PROJECT --source arxiv openalex --query "web agent" --limit 50
 ```
 
-### Phase 2: Agent 审核筛选 ⚠️ AGENT TASK
+### Phase 2: Agent Review (Manual Check)
 
-去重后，Agent 需要审核论文列表，去掉与研究主题无关的内容。
+After deduplication, the Agent needs to review the paper list and remove content unrelated to the research topic.
 
 ```bash
-# 查看当前状态
+# Check current status
 insight-pilot status --json --project $PROJECT
 ```
 
-**Agent 操作**：
-1. 读取 `$PROJECT/.insight/items.json`
-2. 逐条检查每篇论文的 `title` 和 `abstract`
-3. 标记不相关的论文：将 `status` 设为 `"excluded"`，并添加 `exclude_reason`
-4. 保存更新后的 `items.json`
+**Agent Actions**:
+1. Read `$PROJECT/.insight/items.json`
+2. Check `title` and `abstract` for each paper
+3. Mark unrelated papers: set `status` to `"excluded"` and add `exclude_reason`
+4. Save the updated `items.json`
 
 ```json
 {
@@ -120,20 +99,20 @@ insight-pilot status --json --project $PROJECT
 }
 ```
 
-### Phase 3: 下载 PDF 🤖 AUTO
+### Phase 3: Download PDFs
 
-直接执行，无需确认：
+Execute directly, no confirmation needed:
 
 ```bash
-# Step 5: 下载 PDF（只下载 status != "excluded" 的论文）
+# Step 3: Download PDFs (converts to Markdown automatically)
 insight-pilot download --project $PROJECT
 ```
 
-**下载结果**：
-- 成功：`download_status: "success"`，PDF 保存到 `papers/`
-- 失败：`download_status: "failed"`，记录到 `$PROJECT/.insight/download_failed.json`
+**Download Results**:
+- Success: `download_status: "success"`, PDF saved to `papers/`
+- Failed: `download_status: "failed"`, recorded in `$PROJECT/.insight/download_failed.json`
 
-失败列表格式：
+Failure list format:
 ```json
 [
   {
@@ -146,157 +125,130 @@ insight-pilot download --project $PROJECT
 ]
 ```
 
-> **Note**: 高级下载（使用代理/浏览器自动化处理失败项）功能尚未实现，后续版本支持。
+> **Note**: Advanced download (proxy/browser automation for failed items) is not yet implemented.
 
-### Phase 4: 转换与分析论文
+### Phase 4: Analyze Papers
 
-**前置条件**：必须先完成 Phase 3 下载 PDF。
+**Precondition**: Must complete Phase 3 Download PDFs first (`download` command automatically converts PDFs to Markdown).
 
-#### Step 6: PDF 转 Markdown 🤖 AUTO（可选但推荐）
-
-将 PDF 转换为结构化 Markdown，保留表格、公式、图片等格式。支持两种后端：
-
-| 后端 | 速度 | 质量 | 适用场景 |
-|------|------|------|---------|
-| `pymupdf4llm` | ⚡ 快 | 良好 | 大多数论文（默认） |
-| `marker` | 🐢 慢 | 更好 | 复杂表格/公式 |
+**MUST try LLM analysis first**. If LLM is configured, run directly:
 
 ```bash
-# 默认使用 pymupdf4llm（快速，推荐）
-insight-pilot convert --project $PROJECT
-
-# 使用 marker（更高质量但更慢）
-pip install 'insight-pilot[marker]'  # 需要额外安装
-insight-pilot convert --project $PROJECT --backend marker
-```
-
-**配置后端**：也可以在项目的 `config.yaml` 中配置默认后端：
-
-```yaml
-# $PROJECT/.insight/config.yaml
-topic: "WebAgent Research"
-keywords: [web agent, browser agent]
-
-# PDF 转换配置
-pdf_converter:
-  backend: pymupdf4llm  # 或 "marker"
-  page_chunks: false     # pymupdf4llm 选项
-  use_llm: false         # marker 选项（需 API key）
-```
-
-**转换结果**：
-- Markdown 文件保存到 `$PROJECT/.insight/markdown/{id}/{id}.md`
-- 图片提取到 `$PROJECT/.insight/markdown/{id}/images/`（仅 marker）
-- 元数据保存到 `$PROJECT/.insight/markdown/{id}/metadata.json`
-
-#### Step 7: 分析论文
-
-有两种方式：
-
-##### 方式 A: LLM 自动分析 🤖 AUTO（推荐）
-
-如果配置了 LLM，直接执行：
-
-```bash
-# 用 LLM 分析论文（优先使用已转换的 Markdown，否则回退到 PDF 文本提取）
+# Step 4: LLM Analysis (prefers converted Markdown, falls back to PDF text extraction)
 insight-pilot analyze --project $PROJECT
 ```
 
-**内容来源优先级**：
-1. **Markdown** (from `convert`): 高质量结构化文本，保留表格、公式
-2. **PDF 提取** (PyMuPDF): 基础文本提取，可能丢失格式
+**Content Source Priority**:
+1. **Markdown** (from `download` auto-conversion via pymupdf4llm)
+2. **PDF Extraction** (PyMuPDF)
 
-**LLM 配置**：创建 `.codex/skills/insight-pilot/llm.yaml`：
+**LLM Configuration**: Create `.codex/skills/insight-pilot/llm.yaml`:
 
 ```yaml
 provider: openai  # openai / anthropic / ollama
 model: gpt-4o-mini
-api_key: sk-xxx   # 或设置环境变量 OPENAI_API_KEY
+api_key: sk-xxx   # or set env var OPENAI_API_KEY
 ```
 
-##### 方式 B: Agent 手动分析 ⚠️ AGENT TASK
+##### When LLM is not configured: Manual Analysis Required
 
-如果未配置 LLM，Agent 需要手动分析：
+If no LLM is configured, the Agent needs to analyze manually:
 
-1. 读取 `papers/` 目录下的 PDF 文件
-2. 对每篇论文提取关键信息
-3. 将分析结果写入 `$PROJECT/.insight/analysis/{id}.json`
+1. Read PDF files in `papers/` directory
+2. Extract key information for each paper
+3. Write analysis results to `$PROJECT/.insight/analysis/{id}.json`
 
-**分析文件格式** (`$PROJECT/.insight/analysis/{id}.json`)：
+**Analysis File Format** (`$PROJECT/.insight/analysis/{id}.json`):
 ```json
 {
   "id": "i0001",
   "title": "Paper Title",
-  "summary": "一句话总结",
-  "contributions": ["贡献1", "贡献2"],
-  "methodology": "方法描述",
-  "key_findings": ["发现1", "发现2"],
-  "limitations": ["局限性"],
+  "summary": "One sentence summary",
+  "brief_analysis": "2-3 sentences brief analysis",
+  "detailed_analysis": "300-500 words detailed analysis",
+  "contributions": ["Contribution 1", "Contribution 2"],
+  "methodology": "Methodology description",
+  "key_findings": ["Finding 1", "Finding 2"],
+  "limitations": ["Limitations"],
+  "future_work": ["Future work 1"],
+  "relevance_score": 8,
   "tags": ["webagent", "benchmark", "multimodal"],
   "analyzed_at": "2026-01-17T12:00:00Z"
 }
 ```
 
-### Phase 5: 生成增量报告
+### Phase 5: Generate Incremental Report
 
 ```bash
-# Step 6: 生成/更新索引
+# Step 8: Generate/Update Index
 insight-pilot index --project $PROJECT
 ```
 
-报告存储在 `$PROJECT/index.md`，支持增量更新。
+Reports are stored in `$PROJECT/index.md`, showing **only analyzed papers** and linking to `reports/{id}.md` detailed reports.
 
-**报告结构**：
+**Report Structure**:
 ```markdown
-# WebAgent Research Report
+# WebAgent Research
 
-> Last updated: 2026-01-17 | Total papers: 42 | New this update: 5
+> **Generated**: 2026-01-18 10:30
+> **Keywords**: web agent, browser agent
+> **Analyzed**: 5 papers
 
-## Overview
-研究领域概述，Agent 基于分析结果生成
+---
 
-## Key Themes
-- Theme 1: xxx (papers: i0001, i0003)
-- Theme 2: xxx (papers: i0005, i0008)
+## 📚 Analyzed Papers
 
-## Paper Summaries
+### [Paper Title](reports/i0001.md)
 
-### [Paper Title](papers/i0001.pdf)
-- **Authors**: ...
-- **Date**: 2026-01-15
-- **Summary**: ...
-- **Key Contributions**: ...
+**Authors**: Author A, Author B et al. | **Date**: 2026-01-15 | **Links**: arXiv/DOI | **Relevance**: 8/10
 
-## Changelog
-- 2026-01-17: Added 5 new papers on GUI agents
-- 2026-01-10: Initial report with 37 papers
+**Summary**: One sentence summary...
+
+> 2-3 sentences brief analysis...
+
+**Tags**: `webagent` `benchmark` `multimodal`
+
+---
+
+## ⚠️ Papers Not Available
+
+_The following papers could not be downloaded. Only abstracts are shown._
+
+### Paper Title
+
+**Authors**: ... | **Date**: ... | **Links**: ...
+
+> Abstract...
+
+---
+
+## 📊 Statistics
+
+| Metric | Value |
+|--------|-------|
+| Papers Analyzed | 5 |
+| Download Failed | 1 |
+| Total Processed | 6 |
 ```
 
 ---
 
-## 增量更新流程
+## Incremental Update Workflow
 
-后续每日/每周更新时：
+For daily/weekly updates:
 
 ```bash
-# 1. 搜索新论文（使用 --since 限制日期）
-insight-pilot search --project $PROJECT --source arxiv --query "web agent" --since 2026-01-17 --limit 20
-insight-pilot search --project $PROJECT --source openalex --query "web agent" --since 2026-01-17 --limit 20
+# 1. Search new papers (use --since for date limit, auto merge & dedup)
+insight-pilot search --project $PROJECT --source arxiv openalex --query "web agent" --since 2026-01-17 --limit 20
 
-# 2. 合并（会追加到已有结果）
-insight-pilot merge --project $PROJECT
+# 2. [Agent] Review newly added papers
 
-# 3. 去重（会与已有 items 对比）
-insight-pilot dedup --project $PROJECT
-
-# 4. [Agent] 审核新增论文
-
-# 5. 下载新增论文的 PDF
+# 3. Download PDFs for new papers
 insight-pilot download --project $PROJECT
 
-# 6. [Agent] 分析新论文，更新报告
+# 4. [Agent] Analyze new papers, update reports
 
-# 7. 重新生成索引
+# 5. Regenerate index
 insight-pilot index --project $PROJECT
 ```
 
@@ -317,11 +269,10 @@ research/myproject/
 │   │   ├── i0001.json
 │   │   ├── i0002.json
 │   │   └── ...
-│   └── markdown/            # PDF 转换结果（marker）
+│   └── markdown/            # PDF 转换结果（pymupdf4llm）
 │       ├── i0001/
 │       │   ├── i0001.md     # 转换后的 Markdown
-│       │   ├── metadata.json
-│       │   └── images/      # 提取的图片
+│       │   └── metadata.json
 │       └── ...
 ├── papers/                  # 已下载的 PDF
 ├── reports/                 # 历史报告存档
@@ -375,15 +326,15 @@ research/myproject/
 
 ## Agent Guidelines
 
-**执行原则**：
-- 所有 CLI 命令（init, search, merge, dedup, download, index）都是**自动执行**的，**无需询问用户确认**
-- 只有标记为 ⚠️ AGENT TASK 的步骤需要 Agent 介入处理
+**Execution Principles**:
+- First run: Run bootstrap script to auto-setup environment
+- CLI Commands (init, search, download, analyze, index): Run in sequence, no confirmation needed
+- Agent intervention ONLY needed during Phase 2 (Review) and Manual Analysis (if no LLM)
 
-**具体指引**：
-1. **Always use `--json` flag** for structured output
-2. **直接执行 CLI 命令**：不要询问"是否要下载 PDF？"等确认问题，按工作流顺序执行即可
-3. **审核筛选时**：修改 `items.json` 中的 `status` 和 `exclude_reason` 字段
-4. **分析论文时**：为每篇论文创建 `analysis/{id}.json`
-5. **生成报告时**：基于 `items.json` 和 `analysis/` 目录生成结构化报告
-6. **增量更新时**：只处理新增论文，保留已有分析结果
-
+**Specific Guidelines**:
+1. **Environment Setup**: Run `bash .codex/skills/insight-pilot/scripts/bootstrap_env.sh` first
+2. **Use `--json` flag**: Get structured output for parsing
+3. **Execute CLI directly**: Do not ask for confirmation, follow workflow sequence
+4. **Review**: Modify `status` and `exclude_reason` in `items.json`
+5. **LLM Analysis First**: Use `analyze` command if configured, otherwise manually create `analysis/{id}.json`
+6. **Incremental Updates**: Only process new papers, keep existing analysis results

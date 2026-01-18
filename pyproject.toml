@@ -41,14 +41,6 @@ pdf = [
     "PyMuPDF>=1.23.0",
     "pymupdf4llm>=0.0.5",
 ]
-marker = [
-    "marker-pdf>=1.0.0",
-]
-all = [
-    "PyMuPDF>=1.23.0",
-    "pymupdf4llm>=0.0.5",
-    "marker-pdf>=1.0.0",
-]
 
 [project.scripts]
 insight-pilot = "insight_pilot.cli:main"
