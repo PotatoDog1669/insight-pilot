@@ -16,6 +16,7 @@ class ProjectContext:
     def __init__(self, project_root: Path):
         self.root = project_root.resolve()
         self.insight_dir = self.root / ".insight"
+        self.sources_path = self.root / "sources.yaml"
         self.config_path = self.insight_dir / "config.yaml"
         self.state_path = self.insight_dir / "state.json"
         self.items_path = self.insight_dir / "items.json"

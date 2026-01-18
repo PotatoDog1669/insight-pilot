@@ -1,12 +1,12 @@
 ---
 name: insight-pilot
-description: Literature research automation - search arXiv/OpenAlex, deduplicate, download PDFs, analyze and generate research reports. Supports incremental updates.
+description: Literature research automation - search papers, code, and blogs, deduplicate, download PDFs, analyze and generate research reports. Supports incremental updates.
 version: 0.3.0
 ---
 
 # Insight-Pilot Skill
 
-A workflow automation skill for literature research. Searches arXiv and OpenAlex, deduplicates results, downloads PDFs, analyzes content, and generates incremental research reports.
+A workflow automation skill for literature research. Searches papers, GitHub repos/code/issues, PubMed, Dev.to, and blogs, deduplicates results, downloads PDFs, analyzes content, and generates incremental research reports.
 
 ## Setup
 
@@ -42,6 +42,7 @@ insight-pilot <command> [options]
 | `analyze` | Analyze papers with LLM | `--project` | `--config`, `--force` |
 | `index` | Generate index.md | `--project` | `--template` |
 | `status` | Check project state | `--project` | - |
+| `sources` | Manage blog/RSS sources | `--project` | `--add`, `--remove`, `--config` |
 
 ### JSON Output Mode
 
@@ -49,6 +50,53 @@ Add `--json` flag for structured output (recommended for agents):
 
 ```bash
 insight-pilot status --json --project ./research/myproject
+```
+
+### Blog/RSS Sources Configuration
+
+Create `sources.yaml` in your project root:
+
+```yaml
+blogs:
+  - name: "Cursor Blog"
+    type: "ghost"
+    url: "https://cursor.sh/blog"
+    api_key: "auto"
+  - name: "Example WP Blog"
+    type: "wordpress"
+    url: "https://blog.example.com"
+  - name: "OpenAI Blog"
+    type: "rss"
+    url: "https://openai.com/blog/rss.xml"
+    category: "ai"
+```
+
+Manage sources via:
+
+```bash
+insight-pilot sources --project ./research/webagent
+```
+
+Environment variables:
+- `GITHUB_TOKEN` (GitHub API higher rate limit)
+- `PUBMED_EMAIL` (required by NCBI)
+- `OPENALEX_MAILTO` (OpenAlex polite usage)
+- `INSIGHT_PILOT_SOURCES` (override sources.yaml path)
+
+### New Sources Examples
+
+```bash
+# GitHub repositories + code + issues
+insight-pilot search --project $PROJECT --source github --query "agent framework" --limit 30
+
+# PubMed (requires PUBMED_EMAIL)
+insight-pilot search --project $PROJECT --source pubmed --query "clinical agents" --limit 20
+
+# Dev.to articles
+insight-pilot search --project $PROJECT --source devto --query "ai agents" --limit 20
+
+# Blogs (Ghost/WordPress/RSS from sources.yaml)
+insight-pilot search --project $PROJECT --source blog --query "agents" --limit 20
 ```
 
 ---
@@ -72,7 +120,7 @@ PROJECT=./research/webagent
 insight-pilot init --topic "WebAgent Research" --keywords "web agent,browser agent" --output $PROJECT
 
 # Step 2: Search multiple sources (auto merge & dedup)
-insight-pilot search --project $PROJECT --source arxiv openalex --query "web agent" --limit 50
+insight-pilot search --project $PROJECT --source arxiv openalex github pubmed devto blog --query "web agent" --limit 50
 ```
 
 ### Phase 2: Agent Review (Manual Check)

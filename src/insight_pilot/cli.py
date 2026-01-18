@@ -11,6 +11,7 @@ Commands:
     analyze     Analyze papers with LLM
     index       Generate index.md
     status      Show project status
+    sources     Manage blog/RSS sources
 """
 from __future__ import annotations
 
@@ -176,14 +177,14 @@ def cmd_search(args: argparse.Namespace, formatter: OutputFormatter) -> int:
     
     # Handle 'all' keyword
     if "all" in sources:
-        sources = ["arxiv", "openalex"]
+        sources = ["arxiv", "openalex", "github", "pubmed", "devto", "blog"]
     
     # Validate sources
-    valid_sources = {"arxiv", "openalex"}
+    valid_sources = {"arxiv", "openalex", "github", "pubmed", "devto", "blog"}
     for source in sources:
         if source not in valid_sources:
             formatter.error(
-                f"Unknown source: {source}. Available: arxiv, openalex, all",
+                f"Unknown source: {source}. Available: arxiv, openalex, github, pubmed, devto, blog, all",
                 ErrorCode.INVALID_SOURCE.value,
             )
             return 1
@@ -222,6 +223,56 @@ def cmd_search(args: argparse.Namespace, formatter: OutputFormatter) -> int:
                     mailto=mailto,
                     title_only=getattr(args, "title_only", False),
                     max_retries=3,
+                )
+            elif source == "github":
+                from insight_pilot.search.github import search
+
+                token = os.getenv("GITHUB_TOKEN")
+                raw_types = args.github_types or "repositories,code,issues,discussions"
+                types = [t.strip() for t in raw_types.split(",") if t.strip()]
+
+                results = search(
+                    query=args.query,
+                    limit=args.limit,
+                    types=types,
+                    token=token,
+                    max_retries=3,
+                )
+            elif source == "pubmed":
+                from insight_pilot.search.pubmed import search
+
+                email = args.pubmed_email or os.getenv("PUBMED_EMAIL", "")
+                results = search(
+                    query=args.query,
+                    limit=args.limit,
+                    email=email,
+                    include_abstract=not args.pubmed_no_abstract,
+                    max_retries=3,
+                )
+            elif source == "devto":
+                from insight_pilot.search.devto import search
+
+                results = search(
+                    query=args.query,
+                    limit=args.limit,
+                    tag=args.devto_tag,
+                    username=args.devto_username,
+                    organization_id=args.devto_org,
+                    max_retries=3,
+                )
+            elif source == "blog":
+                from insight_pilot.search.blog import search
+                from insight_pilot.sources import list_sources, resolve_sources_path
+
+                sources_path = resolve_sources_path(ctx.root, args.sources_config)
+                blog_sources = list_sources(sources_path)
+                results = search(
+                    sources=blog_sources,
+                    query=args.query,
+                    limit=args.limit,
+                    max_retries=3,
+                    name_filter=args.blog_name,
+                    category_filter=args.blog_category,
                 )
 
             # Save raw results
@@ -293,6 +344,94 @@ def cmd_search(args: argparse.Namespace, formatter: OutputFormatter) -> int:
     except Exception as e:
         formatter.error(str(e), ErrorCode.UNKNOWN.value)
         return 1
+
+
+def cmd_sources(args: argparse.Namespace, formatter: OutputFormatter) -> int:
+    """Manage sources.yaml configuration."""
+    ctx = ProjectContext(Path(args.project)) if args.project else None
+    from insight_pilot.sources import (
+        SUPPORTED_BLOG_TYPES,
+        add_source,
+        list_sources,
+        remove_source,
+        resolve_sources_path,
+        save_sources_config,
+    )
+
+    sources_path = resolve_sources_path(ctx.root if ctx else None, args.config)
+
+    if args.add:
+        if not args.name or not args.type or not args.url:
+            formatter.error("Adding a source requires --name, --type, --url", ErrorCode.MISSING_REQUIRED_ARG.value)
+            return 1
+        source_type = args.type.lower()
+        if source_type not in SUPPORTED_BLOG_TYPES:
+            formatter.error(
+                f"Unsupported source type: {args.type}. Use: {', '.join(sorted(SUPPORTED_BLOG_TYPES))}",
+                ErrorCode.INVALID_INPUT_FORMAT.value,
+            )
+            return 1
+        entry = {
+            "name": args.name,
+            "type": source_type,
+            "url": args.url,
+            "category": args.category,
+            "api_key": args.api_key,
+        }
+        add_source(sources_path, entry)
+        formatter.success(f"Added source '{args.name}'", {"config": str(sources_path)})
+        return 0
+
+    if args.remove:
+        if not args.name:
+            formatter.error("Removing a source requires --name", ErrorCode.MISSING_REQUIRED_ARG.value)
+            return 1
+        removed = remove_source(sources_path, args.name)
+        if removed:
+            formatter.success(f"Removed source '{args.name}'", {"config": str(sources_path)})
+            return 0
+        formatter.error(f"Source '{args.name}' not found", ErrorCode.INVALID_INPUT_FORMAT.value)
+        return 1
+
+    if args.init:
+        save_sources_config(sources_path, {"blogs": []})
+        formatter.success(f"Initialized sources config at {sources_path}")
+        return 0
+
+    sources = list_sources(sources_path)
+    if not sources:
+        formatter.info(f"No sources configured at {sources_path}")
+        return 0
+
+    def status_for(source: Dict[str, object]) -> str:
+        blog_type = (source.get("type") or "").lower()
+        if blog_type not in SUPPORTED_BLOG_TYPES:
+            return "invalid"
+        if blog_type == "ghost":
+            api_key = source.get("api_key")
+            if api_key == "auto":
+                return "auto"
+            if api_key:
+                return "ready"
+            return "missing_api_key"
+        return "ready"
+
+    rows = []
+    for source in sources:
+        rows.append([
+            str(source.get("name") or ""),
+            str(source.get("type") or ""),
+            str(source.get("url") or ""),
+            str(source.get("category") or ""),
+            status_for(source),
+        ])
+
+    formatter.table(
+        ["Name", "Type", "URL", "Category", "Status"],
+        rows,
+        title=f"Sources ({len(rows)})",
+    )
+    return 0
 
 
 
@@ -563,6 +702,9 @@ def cmd_analyze(args: argparse.Namespace, formatter: OutputFormatter) -> int:
     not_downloaded = stats.get('not_downloaded', 0)
     if not_downloaded > 0:
         formatter.info(f"Skipped {not_downloaded} papers without PDF. Run 'download' first.")
+    no_content = stats.get("no_content", 0)
+    if no_content > 0:
+        formatter.info(f"Skipped {no_content} non-paper items without content.")
     formatter.success(
         f"Analysis complete: {stats.get('success', 0)} success, {stats.get('failed', 0)} failed, {stats.get('skipped', 0)} already analyzed",
         result,
@@ -596,12 +738,26 @@ def main() -> int:
     # search
     p_search = subparsers.add_parser("search", help="Search, merge and deduplicate papers")
     p_search.add_argument("--project", required=True, help="Project directory")
-    p_search.add_argument("--source", required=True, nargs="+", help="Source(s): arxiv, openalex, or 'all'")
+    p_search.add_argument(
+        "--source",
+        required=True,
+        nargs="+",
+        help="Source(s): arxiv, openalex, github, pubmed, devto, blog, or 'all'",
+    )
     p_search.add_argument("--query", required=True, help="Search query")
     p_search.add_argument("--limit", type=int, default=50, help="Max results per source")
     p_search.add_argument("--since", help="Start date (YYYY-MM-DD)")
     p_search.add_argument("--until", help="End date (YYYY-MM-DD)")
     p_search.add_argument("--title-only", action="store_true", help="Search title only (OpenAlex)")
+    p_search.add_argument("--github-types", help="GitHub search types (comma-separated)")
+    p_search.add_argument("--pubmed-email", help="PubMed email (overrides PUBMED_EMAIL)")
+    p_search.add_argument("--pubmed-no-abstract", action="store_true", help="Skip PubMed abstract fetch")
+    p_search.add_argument("--devto-tag", help="Dev.to tag filter")
+    p_search.add_argument("--devto-username", help="Dev.to username filter")
+    p_search.add_argument("--devto-org", type=int, help="Dev.to organization ID")
+    p_search.add_argument("--sources-config", help="Path to sources.yaml")
+    p_search.add_argument("--blog-name", help="Filter blog sources by name")
+    p_search.add_argument("--blog-category", help="Filter blog sources by category")
     add_common_args(p_search)
 
 
@@ -628,6 +784,19 @@ def main() -> int:
     p_analyze.add_argument("--force", action="store_true", help="Re-analyze even if already done")
     add_common_args(p_analyze)
 
+    # sources
+    p_sources = subparsers.add_parser("sources", help="Manage blog/RSS sources")
+    p_sources.add_argument("--project", help="Project directory")
+    p_sources.add_argument("--config", help="Path to sources.yaml")
+    p_sources.add_argument("--init", action="store_true", help="Initialize an empty sources.yaml")
+    p_sources.add_argument("--add", action="store_true", help="Add a source")
+    p_sources.add_argument("--remove", action="store_true", help="Remove a source by name")
+    p_sources.add_argument("--name", help="Source name")
+    p_sources.add_argument("--type", help="Source type: ghost, wordpress, rss, auto")
+    p_sources.add_argument("--url", help="Source URL")
+    p_sources.add_argument("--category", help="Source category")
+    p_sources.add_argument("--api-key", help="API key (for Ghost)")
+    add_common_args(p_sources)
 
     args = parser.parse_args()
     # Support --json in both global and subcommand positions
@@ -641,6 +810,7 @@ def main() -> int:
         "analyze": cmd_analyze,
         "index": cmd_index,
         "status": cmd_status,
+        "sources": cmd_sources,
     }
 
     try:

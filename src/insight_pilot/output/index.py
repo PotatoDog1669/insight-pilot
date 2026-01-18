@@ -49,10 +49,32 @@ def format_authors(authors: List[str], max_count: int = 3) -> str:
 def format_sources(item: ItemData) -> str:
     """Format source links."""
     links = []
+    seen_urls = set()
     if item.arxiv_id:
-        links.append(f"[arXiv](https://arxiv.org/abs/{item.arxiv_id})")
+        url = f"https://arxiv.org/abs/{item.arxiv_id}"
+        links.append(f"[arXiv]({url})")
+        seen_urls.add(url)
     if item.doi:
-        links.append(f"[DOI](https://doi.org/{item.doi})")
+        url = f"https://doi.org/{item.doi}"
+        if url not in seen_urls:
+            links.append(f"[DOI]({url})")
+            seen_urls.add(url)
+
+    urls = item.urls if isinstance(item.urls, dict) else {}
+    abstract_url = urls.get("abstract")
+    publisher_url = urls.get("publisher")
+    pdf_url = urls.get("pdf")
+
+    if abstract_url and abstract_url not in seen_urls:
+        links.append(f"[Source]({abstract_url})")
+        seen_urls.add(abstract_url)
+    elif publisher_url and publisher_url not in seen_urls:
+        links.append(f"[Publisher]({publisher_url})")
+        seen_urls.add(publisher_url)
+    if pdf_url and pdf_url not in seen_urls:
+        links.append(f"[PDF]({pdf_url})")
+        seen_urls.add(pdf_url)
+
     return " | ".join(links) if links else ""
 
 
@@ -134,7 +156,6 @@ def generate_analyzed_index(
         source_links = format_sources(item)
         if source_links:
             meta_parts.append(f"**Links**: {source_links}")
-        meta_parts.append(f"**Relevance**: {relevance_score}/10")
         
         lines.append(" | ".join(meta_parts))
         lines.append("")

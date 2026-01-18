@@ -27,6 +27,45 @@ def format_authors(authors: List[str], max_count: int = 10) -> str:
     return ", ".join(authors[:max_count]) + f" et al. (+{len(authors) - max_count})"
 
 
+def format_sources(item: ItemData, placeholder: bool = True) -> str:
+    """Format source links."""
+    links = []
+    seen_urls = set()
+    if item.arxiv_id:
+        url = f"https://arxiv.org/abs/{item.arxiv_id}"
+        links.append(f"[arXiv:{item.arxiv_id}]({url})")
+        seen_urls.add(url)
+    if item.doi:
+        url = f"https://doi.org/{item.doi}"
+        if url not in seen_urls:
+            links.append(f"[DOI:{item.doi}]({url})")
+            seen_urls.add(url)
+    if item.openalex_id:
+        url = f"https://openalex.org/works/{item.openalex_id}"
+        if url not in seen_urls:
+            links.append(f"[OpenAlex:{item.openalex_id}]({url})")
+            seen_urls.add(url)
+
+    urls = item.urls if isinstance(item.urls, dict) else {}
+    abstract_url = urls.get("abstract")
+    publisher_url = urls.get("publisher")
+    pdf_url = urls.get("pdf")
+
+    if abstract_url and abstract_url not in seen_urls:
+        links.append(f"[Source]({abstract_url})")
+        seen_urls.add(abstract_url)
+    elif publisher_url and publisher_url not in seen_urls:
+        links.append(f"[Publisher]({publisher_url})")
+        seen_urls.add(publisher_url)
+    if pdf_url and pdf_url not in seen_urls:
+        links.append(f"[PDF]({pdf_url})")
+        seen_urls.add(pdf_url)
+
+    if links:
+        return " | ".join(links)
+    return "_No external links_" if placeholder else ""
+
+
 def generate_report(item: ItemData, analysis: Dict[str, Any], topic: str) -> str:
     """Generate a detailed markdown report for a single paper.
     
@@ -50,15 +89,7 @@ def generate_report(item: ItemData, analysis: Dict[str, Any], topic: str) -> str
     tags = analysis.get("tags", [])
     relevance_score = analysis.get("relevance_score", "N/A")
     
-    # Format sources
-    sources = []
-    if item.arxiv_id:
-        sources.append(f"[arXiv:{item.arxiv_id}](https://arxiv.org/abs/{item.arxiv_id})")
-    if item.doi:
-        sources.append(f"[DOI:{item.doi}](https://doi.org/{item.doi})")
-    if item.openalex_id:
-        sources.append(f"[OpenAlex:{item.openalex_id}](https://openalex.org/works/{item.openalex_id})")
-    sources_str = " | ".join(sources) if sources else "_No external links_"
+    sources_str = format_sources(item)
     
     # Format date
     date_str = item.date or "_Unknown date_"
@@ -145,12 +176,7 @@ def generate_failed_section(items: List[ItemData]) -> str:
     
     for item in items:
         # Format sources
-        sources = []
-        if item.arxiv_id:
-            sources.append(f"[arXiv](https://arxiv.org/abs/{item.arxiv_id})")
-        if item.doi:
-            sources.append(f"[DOI](https://doi.org/{item.doi})")
-        sources_str = " | ".join(sources) if sources else ""
+        sources_str = format_sources(item, placeholder=False)
         
         lines.append(f"### {item.title}")
         lines.append("")

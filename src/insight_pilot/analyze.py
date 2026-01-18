@@ -50,6 +50,45 @@ DEFAULT_PROMPT = """你是一位学术论文分析专家。请用中文分析以
 
 只返回有效的 JSON，不要使用 markdown 格式。"""
 
+DEFAULT_CONTENT_PROMPT = """你是一位技术内容分析专家。请用中文分析以下技术文章或项目说明，并提供结构化评估。
+
+**标题**: {title}
+**作者**: {authors}
+**日期**: {date}
+**摘要**: {summary}
+
+**正文**:
+{content}
+
+请以 JSON 格式提供结构化分析，包含以下字段：
+
+1. **summary**: 一句话总结核心内容（最多50词，与标题语言一致）
+
+2. **brief_analysis**: 简要分析，2-3句话突出核心价值和亮点（最多100词，与标题语言一致）
+
+3. **detailed_analysis**: 深入分析（300-500词，与标题语言一致），涵盖：
+   - 关注的问题与动机
+   - 方法/实现路径
+   - 关键创新点与贡献
+   - 结果与影响
+   - 意义与价值
+
+4. **contributions**: 主要贡献或亮点列表（3-5条，简洁要点）
+
+5. **methodology**: 使用的方法或实现方式（1-2句话）
+
+6. **key_findings**: 关键发现/结论列表（3-5条）
+
+7. **limitations**: 局限性或不足（1-3条）
+
+8. **future_work**: 潜在的下一步改进或研究方向（1-3条）
+
+9. **tags**: 相关标签/关键词列表（5-10个）
+
+10. **relevance_score**: 与研究主题的相关性评分（1-10分）
+
+只返回有效的 JSON，不要使用 markdown 格式。"""
+
 
 def load_llm_config(config_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """Load LLM configuration from yaml file.
@@ -286,14 +325,26 @@ def analyze_paper(
     authors = item.get("authors", [])
     if isinstance(authors, list):
         authors = ", ".join(authors)
-    
-    prompt = DEFAULT_PROMPT.format(
-        title=item.get("title", "Unknown"),
-        authors=authors,
-        date=item.get("date", "Unknown"),
-        abstract=item.get("abstract", "Not available"),
-        pdf_content=pdf_content,
-    )
+    item_type = item.get("type", "paper")
+
+    if item_type in {"blog", "github"}:
+        summary = item.get("summary") or "Not available"
+        content = full_text or item.get("abstract") or "Not available"
+        prompt = DEFAULT_CONTENT_PROMPT.format(
+            title=item.get("title", "Unknown"),
+            authors=authors or "Unknown",
+            date=item.get("date", "Unknown"),
+            summary=summary,
+            content=content,
+        )
+    else:
+        prompt = DEFAULT_PROMPT.format(
+            title=item.get("title", "Unknown"),
+            authors=authors,
+            date=item.get("date", "Unknown"),
+            abstract=item.get("abstract", "Not available"),
+            pdf_content=pdf_content,
+        )
     
     # Call appropriate provider
     if provider == "openai":
@@ -358,7 +409,14 @@ def analyze_papers(
     
     analysis_dir.mkdir(parents=True, exist_ok=True)
     
-    stats = {"total": 0, "success": 0, "failed": 0, "skipped": 0, "not_downloaded": 0}
+    stats = {
+        "total": 0,
+        "success": 0,
+        "failed": 0,
+        "skipped": 0,
+        "not_downloaded": 0,
+        "no_content": 0,
+    }
     errors: List[Dict[str, str]] = []
     
     for item in items:
@@ -372,10 +430,16 @@ def analyze_papers(
         
         stats["total"] += 1
         
-        # Skip if not downloaded - must have PDF to analyze
-        if item.get("download_status") != "success":
-            stats["not_downloaded"] += 1
-            continue
+        item_type = item.get("type", "paper")
+        has_inline_content = bool(item.get("abstract") or item.get("summary"))
+        if item_type == "paper":
+            if item.get("download_status") != "success":
+                stats["not_downloaded"] += 1
+                continue
+        else:
+            if item.get("download_status") != "success" and not has_inline_content:
+                stats["no_content"] += 1
+                continue
         
         # Skip if already analyzed
         analysis_path = analysis_dir / f"{item_id}.json"

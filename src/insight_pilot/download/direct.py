@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn, TransferSpeedColumn
 
 from insight_pilot.models import utc_now_iso
 
@@ -44,7 +45,7 @@ def is_pdf(path: Path) -> bool:
         return False
 
 
-def download_with_retry(url: str, path: Path, max_retries: int) -> Optional[str]:
+def download_with_retry(url: str, path: Path, max_retries: int, progress: Optional[Progress] = None, task_id: Optional[object] = None) -> Optional[str]:
     """Download file with retry logic. Returns error message or None on success."""
     delay = 1.0
     headers = {"User-Agent": "Insight-Pilot/0.2"}
@@ -55,10 +56,18 @@ def download_with_retry(url: str, path: Path, max_retries: int) -> Optional[str]
             if response.status_code != 200:
                 raise requests.HTTPError(f"HTTP {response.status_code}")
 
+            total_size = int(response.headers.get('content-length', 0))
+            if progress and task_id and total_size:
+                progress.update(task_id, total=total_size)
+
+            downloaded = 0
             with open(path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress and task_id:
+                            progress.update(task_id, completed=downloaded)
 
             if not is_pdf(path):
                 raise ValueError("Downloaded file is not a PDF")
@@ -132,42 +141,64 @@ def download_pdfs(
     stats = {"total": len(items), "success": 0, "failed": 0, "unavailable": 0, "skipped": 0, "excluded": 0}
     pending_items: List[Dict[str, object]] = []
 
-    for item in items:
-        # Skip excluded items (filtered out by agent review)
-        if item.get("status") == "excluded":
-            stats["excluded"] += 1
-            continue
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+    ) as progress:
+        overall_task = progress.add_task(f"[cyan]下载论文 PDF", total=len(items))
+        
+        for idx, item in enumerate(items, 1):
+            # Skip excluded items (filtered out by agent review)
+            if item.get("status") == "excluded":
+                stats["excluded"] += 1
+                progress.update(overall_task, advance=1)
+                continue
 
-        urls = item.get("urls", {}) or {}
-        pdf_url = urls.get("pdf")
+            urls = item.get("urls", {}) or {}
+            pdf_url = urls.get("pdf")
 
-        # Skip already downloaded
-        if item.get("download_status") == "success" and item.get("local_path"):
-            stats["skipped"] += 1
-            stats["success"] += 1
-            continue
+            # Skip already downloaded
+            if item.get("download_status") == "success" and item.get("local_path"):
+                stats["skipped"] += 1
+                stats["success"] += 1
+                progress.update(overall_task, advance=1)
+                continue
+                
+            # No URL available
+            if not pdf_url:
+                item["download_status"] = "unavailable"
+                item["download_error"] = "No PDF URL"
+                stats["unavailable"] += 1
+                progress.update(overall_task, advance=1)
+                continue
+
+            filename = build_filename(item, used_names)
+            title = str(item.get("title", ""))[:50]
             
-        # No URL available
-        if not pdf_url:
-            item["download_status"] = "unavailable"
-            item["download_error"] = "No PDF URL"
-            stats["unavailable"] += 1
-            continue
+            # Create a task for this specific download
+            download_task = progress.add_task(f"[green][{idx}/{len(items)}] {title}", total=None)
+            
+            target = output_dir / filename
+            error = download_with_retry(pdf_url, target, max_retries, progress, download_task)
 
-        filename = build_filename(item, used_names)
-        target = output_dir / filename
-        error = download_with_retry(pdf_url, target, max_retries)
-
-        if error:
-            item["download_status"] = "failed"
-            item["download_error"] = error
-            stats["failed"] += 1
-            pending_items.append(build_pending_item(item, pdf_url, error))
-        else:
-            item["download_status"] = "success"
-            item["download_error"] = None
-            item["local_path"] = make_local_path(output_dir, filename)
-            stats["success"] += 1
+            progress.remove_task(download_task)
+            
+            if error:
+                item["download_status"] = "failed"
+                item["download_error"] = error
+                stats["failed"] += 1
+                pending_items.append(build_pending_item(item, pdf_url, error))
+            else:
+                item["download_status"] = "success"
+                item["download_error"] = None
+                item["local_path"] = make_local_path(output_dir, filename)
+                stats["success"] += 1
+            
+            progress.update(overall_task, advance=1)
 
     return {
         "generated_at": utc_now_iso(),

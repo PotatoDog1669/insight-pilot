@@ -36,11 +36,18 @@ class ItemData:
     download_status: str = "pending"
     status: str = "active"
     local_path: Optional[str] = None
+    source: List[str] = field(default_factory=list)
+    urls: Dict[str, object] = field(default_factory=dict)
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ItemData":
         """Create from dictionary (items.json format)."""
         identifiers = data.get("identifiers", {}) or {}
+        source_value = data.get("source", "")
+        if isinstance(source_value, list):
+            sources = [s for s in source_value if s]
+        else:
+            sources = [source_value] if source_value else []
         return cls(
             id=data.get("id", ""),
             title=data.get("title", "Untitled"),
@@ -53,6 +60,8 @@ class ItemData:
             download_status=data.get("download_status", "pending"),
             status=data.get("status", "active"),
             local_path=data.get("local_path"),
+            source=sources,
+            urls=data.get("urls", {}) or {},
         )
 
 
